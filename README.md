@@ -26,6 +26,20 @@ The signaling listener binds only to `127.0.0.1:47831`, requires a random per-se
 
 Verification: all 12 unit checks and syntax checks passed. An actual unpacked Edge extension was exercised through its popup with a changing synthetic tab. WebRTC delivered its video to the app renderer, pixels continued changing after setting the source window to minimized in a headless browser test, and app Stop ended extension sharing. Electron IPC was simulated in this test; a native Electron plus live Meet session is still a manual Windows acceptance check. Other call platforms are not yet validated.
 
+## Speaker-baseline AI backend
+
+The merged `app/` package contains the Python multimodal pipeline from the `speaker-baseline` branch. It learns an in-memory voice and face baseline for the current speaker, marks readings as warming up, usual, changed, or unavailable, and only uses informative channels when calculating cross-modal mismatch. This avoids treating a naturally flat voice, a rarely smiling face, missing video, or unclear speech as evidence of hidden meaning.
+
+The Python backend and the Electron companion currently have separate entry points. Merging the branch preserves both working prototypes; it does not yet route the Electron tab stream into the Python coordinator or display Python cue results in the Electron UI. The Electron app remains the default `npm start` experience. To run the Python overlay separately on Windows:
+
+```powershell
+uv sync
+Copy-Item .env.example .env
+uv run sociallens --demo
+```
+
+`GEMINI_API_KEY` is optional for the deterministic/offline fallback. Live mode is `uv run sociallens`; it uses Windows audio/screen capture and may download local ML models on first use. Run the backend checks with `uv run pytest`. Do not claim end-to-end Electron/backend integration until the media and cue IPC boundary is implemented and tested.
+
 ## Run locally
 
 Install Node.js 22.12 or newer with npm, then run in this repository:

@@ -1,0 +1,222 @@
+================================================================================
+SOCIALLENS - STEP-BY-STEP IMPLEMENTATION PROMPTS
+A Sequential Prompt Guide for Modular, Bug-Free Hackathon Building
+================================================================================
+
+HOW TO USE:
+Copy and paste each prompt block below in order into the AI coding agent.
+Verify that the step passes tests before proceeding to the next prompt.
+
+
+================================================================================
+PHASE 1: ENVIRONMENT & CORE MATH ENGINE
+================================================================================
+
+[PROMPT 1.1: Scaffolding, Dependencies & Emotion Taxonomy]
+--------------------------------------------------------------------------------
+Let's start Phase 1 of SocialLens. Please:
+1. Create a requirements.txt with all necessary dependencies:
+   - soundcard
+   - numpy
+   - scipy
+   - faster-whisper
+   - transformers
+   - torch
+   - mss
+   - opencv-python
+   - PyQt6
+   - google-genai
+   - python-dotenv
+   - pytest
+2. Create the project directory structure as specified in PROJECT_PLAN.md:
+   - app/
+     - capture/
+     - pipelines/
+     - math_engine/
+     - agent/
+     - ui/
+       - components/
+   - tests/
+   - assets/
+3. Implement app/config.py for global settings (sample rates, buffer sizes, JSD threshold tau=0.45, model names, API keys).
+4. Implement app/pipelines/taxonomy.py defining the canonical 7-emotion discrete simplex ('joy', 'surprise', 'sadness', 'anger', 'disgust', 'fear', 'neutral'), including helper functions for vector validation, label indexing, and softmax normalization.
+
+
+[PROMPT 1.2: Multi-Distribution Jensen-Shannon Divergence (JSD) & Unit Tests]
+--------------------------------------------------------------------------------
+Now let's build the mathematical core in app/math_engine/jsd.py:
+1. Implement the generalized Jensen-Shannon Divergence for three discrete distributions (P_v, P_a, P_s) using base-2 logarithm so the output is strictly bounded between [0, 1].
+2. Include epsilon-clamping (1e-12) for numerical stability to prevent log2(0) or division-by-zero errors.
+3. Add pairwise JSD calculation functions to identify which specific modalities conflict the most (e.g., Words vs. Tone, Words vs. Face).
+4. Create tests/test_jsd.py with pytest unit tests verifying:
+   - Identical distributions yield JSD = 0.0.
+   - Completely disjoint orthogonal distributions yield maximum divergence approaching 1.0.
+   - Symmetry: permuting the order of distributions does not change the resulting score.
+   - Edge cases: uniform distributions, zero-prob elements, and boundary values.
+5. Run the unit tests via terminal and confirm they all pass.
+
+
+================================================================================
+PHASE 2: COGNITIVE REASONING ENGINE (GEMINI 2.5 FLASH)
+================================================================================
+
+[PROMPT 2.1: Gemini Reasoning Agent & Structured Schema]
+--------------------------------------------------------------------------------
+Let's implement the cognitive reasoner in app/agent/gemini_reasoner.py:
+1. Use the new google-genai SDK targeting gemini-2.5-flash with structured JSON response mode (response_mime_type="application/json").
+2. Define a strict output schema returning:
+   - social_cue_type (e.g., "Dry Sarcasm / Irony", "Playful Teasing", "Concealed Frustration", "Polite Agreement", "Understated Humor", "Ambiguous")
+   - confidence ("High", "Medium", "Low")
+   - explanation (1-2 sentences explaining why the cross-modal mismatch indicates this cue)
+   - suggested_action (practical, supportive advice on how to respond)
+3. Write an empathetic prompt instructing the model to translate cross-modal incongruence into assistive, non-accusatory advice for a neurodivergent user.
+4. Add a graceful fallback/mock mode so the application still functions smoothly if the GEMINI_API_KEY is missing or the machine is offline.
+5. Create a test script tests/test_gemini_reasoner.py that simulates a deadpan sarcasm scenario, calls the reasoner, and prints the parsed structured JSON response.
+
+
+================================================================================
+PHASE 3: THE THREE INDEPENDENT PERCEPTION PIPELINES
+================================================================================
+
+[PROMPT 3.1: Semantic Pipeline (STT + Text Emotion)]
+--------------------------------------------------------------------------------
+Let's implement the Semantic Pipeline in app/pipelines/semantic_pipeline.py:
+1. Use faster-whisper (model size "base.en") to transcribe incoming audio buffers into text with timestamps and confidence.
+2. Use a fast pre-trained Hugging Face emotion classifier (e.g., "j-hartmann/emotion-english-distilroberta-base") to classify the transcribed text into an emotion distribution.
+3. Project the model's raw output probabilities into the canonical 7-emotion simplex via taxonomy.py.
+4. If the transcript is empty or pure silence/noise, return a fallback neutral distribution.
+5. Create a test script tests/test_semantic_pipeline.py that feeds a sample text string (e.g., "Oh wow, that's just fantastic news.") and verifies the 7-D probability vector output.
+
+
+[PROMPT 3.2: Audio Acoustic/Prosody Pipeline]
+--------------------------------------------------------------------------------
+Let's implement the Audio Prosody Pipeline in app/pipelines/audio_pipeline.py:
+1. Ingest raw 16kHz mono audio waveform segments.
+2. Extract acoustic tone emotion using a lightweight pre-trained audio emotion model (e.g., "superb/hubert-base-superb-er" or "ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition") OR acoustic prosody feature extraction (pitch variance, energy contour, jitter, speech rate).
+3. Project the predicted probabilities into the canonical 7-emotion simplex.
+4. Include heuristic checks (e.g., detecting flat monotone pitch with low variance indicating deadpan delivery).
+5. Create a test script tests/test_audio_pipeline.py that tests synthetic/sample audio waveforms (flat monotone vs. high-pitched excited) and verifies the 7-D probability distribution output.
+
+
+[PROMPT 3.3: Video Perception Pipeline]
+--------------------------------------------------------------------------------
+Let's implement the Video Pipeline in app/pipelines/video_pipeline.py:
+1. Receive RGB frame crops of the speaker's face from screen capture.
+2. Use OpenCV Haar Cascades / MediaPipe / lightweight face detector to extract the face bounding box.
+3. Classify facial emotion into the canonical 7-emotion simplex using an ONNX facial emotion model or DeepFace/FER backend.
+4. Aggregate predictions across 3-5 sampled keyframes over the utterance window by averaging the probability vectors.
+5. Graceful fallback: If no face is detected (camera off or occluded), return a uniform neutral distribution with a "face_detected=False" flag.
+6. Create tests/test_video_pipeline.py to verify inference on a sample face image.
+
+
+================================================================================
+PHASE 4: CAPTURE & VOICE ACTIVITY DETECTION (VAD)
+================================================================================
+
+[PROMPT 4.1: Audio Loopback & Silero VAD Ingestion]
+--------------------------------------------------------------------------------
+Let's implement the audio capture and speech segmentation:
+1. In app/capture/audio_loopback.py, use the soundcard library to capture Windows default speaker loopback (WASAPI) continuously into a thread-safe circular buffer holding the last 8 seconds of 16kHz mono audio.
+2. In app/capture/vad_detector.py, integrate Silero VAD (torch/onnx) to monitor incoming audio chunks in real time.
+3. Detect speech start and speech end. Trigger an "utterance complete" event when speech is followed by >= 500ms of silence.
+4. Slice the corresponding audio segment from the buffer and emit it to a callback function for downstream pipeline processing.
+5. Create a test script tests/test_audio_capture.py that records 5 seconds of system audio and prints VAD speech intervals.
+
+
+[PROMPT 4.2: Screen Capture & Speaker Region Cropping]
+--------------------------------------------------------------------------------
+Let's implement the screen capture system in app/capture/screen_capture.py:
+1. Use the mss library to capture a specified screen region or monitor coordinates at 30+ FPS with low CPU overhead.
+2. Maintain a ring buffer of recent frames timestamped to align with the audio stream.
+3. Provide a simple calibration utility or interactive selector allowing the user to select the bounding box of the speaker's video tile on Zoom/Teams/Meet.
+4. Create tests/test_screen_capture.py to test grabbing frames and saving a test screenshot to disk.
+
+
+================================================================================
+PHASE 5: DESKTOP HUD OVERLAY (PyQt6)
+================================================================================
+
+[PROMPT 5.1: Frameless Transparent Window & Glassmorphism Styling]
+--------------------------------------------------------------------------------
+Let's build the desktop overlay foundation in app/ui/overlay_window.py and app/ui/styles.py:
+1. Create a PyQt6 QMainWindow with:
+   - Qt.WindowType.FramelessWindowHint
+   - Qt.WindowType.WindowStaysOnTopHint
+   - Qt.WidgetAttribute.WA_TranslucentBackground
+2. Implement custom mousePressEvent and mouseMoveEvent handlers so the user can click and drag the overlay smoothly anywhere across the screen.
+3. Apply modern dark glassmorphic styling in styles.py:
+   - Semi-transparent dark slate backdrop: rgba(18, 22, 31, 0.88)
+   - Border: 1px solid rgba(255, 255, 255, 0.12)
+   - Rounded corners: 16px
+   - Clean sans-serif typography (Segoe UI / Inter)
+4. Add a compact header bar with an active pulse indicator dot ("● Listening"), a minimize/collapse button, and a close button.
+5. Verify the window renders cleanly and floats over desktop windows by running a quick launcher script.
+
+
+[PROMPT 5.2: Live Telemetry Meters & Incongruence Gauge]
+--------------------------------------------------------------------------------
+Let's add live telemetry components to the HUD:
+1. Create a 3-channel telemetry widget in app/ui/components/telemetry_widget.py displaying:
+   - Face (Video): Top emotion label + animated colored percentage bar.
+   - Tone (Audio): Top emotion label + animated colored percentage bar.
+   - Words (Semantics): Top emotion label + animated colored percentage bar.
+2. Add an Incongruence Gauge (JSD score from 0.0 to 1.0) with dynamic color transitions:
+   - Green (0.00 - 0.35): "In Sync"
+   - Amber (0.35 - 0.48): "Nuance"
+   - Purple / Magenta (> 0.48): "Cue Detected"
+3. Connect UI updates strictly via PyQt signals (pyqtSignal) to guarantee zero UI stutter or threading crashes.
+4. Include a test mode that feeds simulated oscillating distributions to verify smooth animations.
+
+
+[PROMPT 5.3: Subtext Insight Card (Animated Cue Card)]
+--------------------------------------------------------------------------------
+Let's build the Subtext Insight Card widget in app/ui/components/cue_card.py:
+1. Create an expandable notification card that slides or fades in smoothly whenever the JSD score exceeds the threshold and Gemini returns a social cue breakdown.
+2. Display:
+   - Cue Badge: e.g. "DRY SARCASM / IRONY" with a styled tag pill.
+   - Explanation: 1-2 clear sentences explaining the multimodal mismatch.
+   - Suggested Response: A practical tip on how to interpret or reply.
+   - Dismiss button and an automatic 10-second fade-out timer.
+3. Add a manual "Test Trigger" button for development so the card can be previewed instantly.
+
+
+================================================================================
+PHASE 6: ORCHESTRATION, INTEGRATION & HACKATHON DEMO MODE
+================================================================================
+
+[PROMPT 6.1: Pipeline Coordinator & Application Loop]
+--------------------------------------------------------------------------------
+Let's bind all modules together in app/coordinator.py and app/main.py:
+1. Create a QThread-based Coordinator that orchestrates:
+   - Ingesting speech chunk from Audio Loopback + Silero VAD
+   - Triggering parallel execution of:
+     * Semantic Pipeline (STT -> text emotion)
+     * Audio Pipeline (audio waveform -> acoustic emotion)
+     * Video Pipeline (screen frame -> face emotion)
+   - Passing the 3 probability vectors to math_engine/jsd.py
+   - Emitting telemetry updates to the PyQt6 HUD
+   - If JSD >= tau: calling app/agent/gemini_reasoner.py and emitting the cue card signal
+2. Implement clean startup and graceful shutdown routines ensuring all audio streams and threads terminate cleanly on exit.
+
+
+[PROMPT 6.2: Built-in Fail-Safe Demo Mode]
+--------------------------------------------------------------------------------
+For live judging and recording the 2-3 minute demo video, let's create a deterministic simulation mode in app/mock_demo.py:
+1. Implement a --demo CLI flag that loads pre-configured conversational scenarios:
+   - Scenario 1 (Deadpan Sarcasm): Words="Yeah, that's just fantastic.", Tone=monotone/neutral, Face=deadpan -> JSD=0.72 -> Gemini explains sarcasm.
+   - Scenario 2 (Sincere Praise): Words="Thank you so much, this is great!", Tone=joyful, Face=smiling -> JSD=0.18 -> All green, no interruption.
+   - Scenario 3 (Concealed Frustration): Words="No, it's totally fine, don't worry about it.", Tone=clipped/tense, Face=tight grimace -> JSD=0.64 -> Gemini explains passive frustration.
+2. Bind keyboard hotkeys (keys 1, 2, 3) to trigger these scenarios on demand during the demo.
+3. Verify that running "python app/main.py --demo" allows full live testing without needing a third party on a Zoom call.
+
+
+[PROMPT 6.3: Final Polish, Documentation & Verification]
+--------------------------------------------------------------------------------
+Let's complete the final deliverables for hackathon submission:
+1. Run full end-to-end tests on the application in both --demo and --live modes.
+2. Update README.md with:
+   - Project pitch and alignment with Meta's challenge ("Bringing People Closer Together with AI").
+   - System Architecture diagram and mathematical JSD explanation.
+   - Installation and setup instructions.
+   - Video recording script and timestamp guide for the 2.5-minute demo video.
+3. Confirm repository cleanliness (clean .gitignore, no temporary caches or sensitive API keys).

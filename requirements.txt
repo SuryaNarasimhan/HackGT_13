@@ -1,0 +1,25 @@
+# Core Audio & Signal Processing
+soundcard>=0.4.3
+numpy>=1.24.0
+scipy>=1.10.0
+
+# Speech Recognition & Deep Learning
+faster-whisper>=1.0.0
+transformers>=4.40.0
+torch>=2.2.0
+
+# Screen Capture & Computer Vision
+mss>=9.0.1
+opencv-python>=4.8.0,<5.0.0
+pillow>=10.0.0
+
+
+# UI & Desktop Overlay
+PyQt6>=6.6.0
+
+# AI / Reasoning
+google-genai>=0.1.0
+python-dotenv>=1.0.0
+
+# Testing & Quality
+pytest>=8.0.0

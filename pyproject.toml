@@ -1,0 +1,36 @@
+[project]
+name = "sociallens"
+version = "0.1.0"
+description = "SocialLens: Real-Time Multimodal Social Cue HUD for Video Calls"
+readme = "README.md"
+authors = [
+    { name = "stabweee", email = "stanleyhsu2008@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "faster-whisper>=1.0.0",
+    "google-genai>=0.1.0",
+    "mss>=9.0.1",
+    "numpy>=1.24.0",
+    "opencv-python>=4.8.0,<5.0.0",
+    "pillow>=12.3.0",
+    "pyqt6>=6.6.0",
+    "pytest>=8.0.0",
+    "python-dotenv>=1.0.0",
+    "scipy>=1.10.0",
+    "soundcard>=0.4.3",
+    "torch>=2.2.0",
+    "transformers>=4.40.0",
+]
+
+[project.scripts]
+sociallens = "app.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+
