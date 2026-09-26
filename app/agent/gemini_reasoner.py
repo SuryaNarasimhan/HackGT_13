@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 from app.config import GEMINI_API_KEY, GEMINI_MODEL
-from app.pipelines.speaker_baseline import STATUS_LABELS, STATUS_USED, STATUS_USUAL
+from app.pipelines.speaker_baseline import STATUS_LABELS, STATUS_NO_WORDS, STATUS_USED, STATUS_USUAL
 from app.pipelines.taxonomy import (
     get_top_emotion,
     vector_to_dict,
@@ -130,7 +130,10 @@ class GeminiReasoner:
         if is_trigger is None:
             is_trigger = bool(jsd_score >= 0.40 or max_conflict_value >= 0.65)
 
-        if self.client:
+        # Nothing was transcribed, so there is nothing for Gemini to interpret
+        no_words = (channel_status or {}).get("words") == STATUS_NO_WORDS
+
+        if self.client and not no_words:
             try:
                 return self._call_gemini(
                     transcript=transcript,
@@ -345,6 +348,16 @@ Interpret the social context for the user:
         is only named when the words or conversation support it.
         """
         status = channel_status or {}
+        if status.get("words") == STATUS_NO_WORDS:
+            # Without words there is no basis for any reading, including "authentic"
+            return {
+                "social_cue_type": "Ambiguous",
+                "confidence": "Low",
+                "explanation": "Couldn't make out the words this time, so there's nothing to interpret yet.",
+                "suggested_action": "Keep listening; if you missed it too, it's fine to ask them to repeat.",
+                "transcript": transcript
+            }
+
         top_words, _ = get_top_emotion(p_semantic)
         top_tone = get_top_emotion(p_audio)[0] if status.get("tone", STATUS_USED) == STATUS_USED else None
         top_face = get_top_emotion(p_video)[0] if status.get("face", STATUS_USED) == STATUS_USED else None

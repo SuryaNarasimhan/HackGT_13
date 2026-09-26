@@ -182,6 +182,22 @@ class TestGeminiReasoner(unittest.TestCase):
         self.assertIn("never enough on their own", prompt)
         self.assertNotIn("indicates sarcasm", prompt)
 
+    def test_no_words_is_not_called_authentic(self):
+        """With nothing transcribed, the card says so instead of vouching for the speaker."""
+        result = self.reasoner.synthesize_cue(
+            transcript="[Speech detected without clear transcript]",
+            p_video=self.FLAT,
+            p_audio=self.FLAT,
+            p_semantic=np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]),
+            jsd_score=0.0,
+            is_trigger=False,
+            channel_status={"words": "no_words", "tone": "used", "face": "unavailable"}
+        )
+
+        self.assertEqual(result["social_cue_type"], "Ambiguous")
+        self.assertEqual(result["confidence"], "Low")
+        self.assertIn("Couldn't make out the words", result["explanation"])
+
     def test_unknown_category_becomes_ambiguous(self):
         """Categories outside the schema are not shown to the user."""
         result = self.reasoner._validate_response(
