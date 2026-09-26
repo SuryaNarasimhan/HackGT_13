@@ -85,6 +85,7 @@
             busy = false;
             const stale = performance.now() - data.timestamp > 2500;
             const result = stale ? smoother.unavailable('uncertain', 'Uncertain · analysis is too slow') : smoother.update(data.faces, data.timestamp);
+            window.dispatchEvent(new CustomEvent('msas:face-result', { detail: { faces: stale ? [] : data.faces, status: result.status } }));
             mesh = !stale && data.faces.length === 1 ? data.faces[0].mesh : [];
             show(result.text, result.status); draw();
             timer = setTimeout(analyze, 250);
@@ -148,7 +149,8 @@
           live = value; $('face-controls').hidden = !live;
           if (!live) { clear(); $('show-landmarks').checked = false; }
         },
-        stop() { live = false; clear(); $('face-controls').hidden = true; $('show-landmarks').checked = false; }
+        stop() { live = false; clear(); $('face-controls').hidden = true; $('show-landmarks').checked = false; },
+        getRegion() { return region ? { ...region } : null; }
       };
     }
   };

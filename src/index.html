@@ -9,6 +9,7 @@
   <script src="face-state.js" defer></script>
   <script src="face-analysis.js" defer></script>
   <script src="tab-capture.js" defer></script>
+  <script src="live-analysis.js" defer></script>
   <script src="app.js" defer></script>
 </head>
 <body>
@@ -58,10 +59,10 @@
           <input id="speaker-context" placeholder="Language, region, or other context" maxlength="160">
         </fieldset>
         <p class="context-note">Only what you choose to share. Never inferred from a face or accent.</p>
-        <p class="prototype-note">Facial expressions run locally. Speech and social-cue analysis come later; context settings aren’t used yet.</p>
+        <p class="prototype-note">Facial, vocal, and speech signals run through the local companion. Gemini explanations are used only when you configure an API key.</p>
       </section>
     </div>
-    <footer>No recordings or uploads. Stop clears the preview and session settings.</footer>
+    <footer>Recordings are not stored. Stop clears the preview and live analysis session.</footer>
   </main>
   <dialog id="source-dialog" aria-labelledby="picker-heading" aria-describedby="picker-description">
     <div class="dialog-heading"><h2 id="picker-heading">Choose a call source</h2><button id="close-picker" class="icon-button" aria-label="Close source picker">×</button></div>

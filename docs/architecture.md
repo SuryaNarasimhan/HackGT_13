@@ -1,6 +1,14 @@
 # MSAS Architecture
 
-Status: Windows capture/UI and local facial-expression analysis implemented. Speech and social-cue fusion remain proposed.
+Status: Windows capture, local facial analysis, Electron-to-Python speech/tone/semantic processing, fusion, and a separate analysis overlay are implemented. Native Google Meet acceptance and model-quality evaluation remain required.
+
+## Electron–Python live analysis boundary (implemented)
+
+After a capture reaches the live state, Electron starts `app.electron_bridge` as a child process. The renderer resamples only an opted-in captured call-audio track to 16 kHz float32 chunks. Once the user selects a participant rectangle, it also sends a bounded JPEG crop once per second. The bridge accepts newline-delimited JSON with strict message-size limits and injects these streams into `PipelineCoordinator`; it never opens the physical microphone or performs its own screen capture.
+
+The coordinator segments speech, transcribes an utterance, evaluates vocal, semantic, and selected-face signals, compares face and voice with the in-memory speaker baseline, calculates cross-modal divergence, and emits one structured result. A dedicated frameless Electron window renders the three score distributions, channel/baseline status, transcript, cue, explanation, suggested response, and signal-difference score. It uses the setup application's ivory, forest, and sage palette with a translucent blurred surface and can collapse to its title bar.
+
+Raw media, transcript history, and speaker baselines are session-memory data and are cleared when the capture stops. Without `GEMINI_API_KEY`, explanation uses the deterministic local fallback. When a key is configured, the reasoner sends transcript/history and derived distributions to Gemini; raw audio and video remain local. The overlay calls scores “model confidence” and presents meaning as a likely reading because these distributions are not calibrated probabilities of a person's true feelings.
 
 ## Browser tab transport (implemented)
 

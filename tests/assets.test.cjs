@@ -5,6 +5,8 @@ const { resolveAsset, assetResponse } = require('../electron/assets.cjs');
 const root = path.resolve(__dirname, '..');
 test('only explicitly listed local assets are available', () => {
   assert.equal(resolveAsset('msas://app/index.html', root), path.join(root, 'src/index.html'));
+  assert.equal(resolveAsset('msas://app/analysis-overlay.html', root), path.join(root, 'src/analysis-overlay.html'));
+  assert.equal(resolveAsset('msas://app/audio-worklet.js', root), path.join(root, 'src/audio-worklet.js'));
   for (const url of ['https://app/index.html', 'msas://other/index.html', 'msas://app/electron/main.cjs', 'msas://app/../package.json', 'msas://app/%2e%2e%2fpackage.json', 'msas://user@app/index.html', 'msas://app/models/faceres.json']) assert.equal(resolveAsset(url, root), null);
 });
 test('local responses enforce no remote connections and deny writes', async () => {

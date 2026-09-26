@@ -1,6 +1,7 @@
 const $ = id => document.getElementById(id);
 const api = window.msas;
 const faceAnalysis = window.FaceAnalysis.create($('video'));
+const liveAnalysis = window.LiveAnalysis.create($('video'), faceAnalysis, api);
 let selected = null, stream = null, audioContext = null, audioTimer = null;
 let generation = 0, currentMode = 'idle', lastState = null;
 const tabCapture = api ? window.TabCapture.create(api, receiveTabStream, async message => { await api.stop(); notice(message); }) : null;
@@ -8,6 +9,7 @@ const tabCapture = api ? window.TabCapture.create(api, receiveTabStream, async m
 function notice(message = '') { $('notice').textContent = message; $('notice').hidden = !message; }
 function releaseMedia() {
   tabCapture?.stop();
+  liveAnalysis.stop();
   faceAnalysis.stop();
   generation++;
   if (stream) { stream.getTracks().forEach(track => { track.onended = null; track.stop(); }); stream = null; }
@@ -60,6 +62,8 @@ async function receiveTabStream(media) {
   try { monitorAudio(media, $('system-audio').checked); }
   catch { $('audio-label').textContent = 'Video active · audio meter unavailable'; }
   await api.captureReady(media.getAudioTracks().length > 0);
+  try { await liveAnalysis.start(media); }
+  catch (error) { notice(`Capture is active, but AI analysis could not start: ${error.message || 'run npm run setup:ai and restart MSAS.'}`); }
 }
 async function loadSources() {
   $('source-list').textContent = 'Finding available windows and screens…';
@@ -167,6 +171,8 @@ async function startCapture() {
     }
     stage = 'opening the companion overlay';
     await api.captureReady(media.getAudioTracks().length > 0);
+    try { await liveAnalysis.start(media); }
+    catch (error) { notice(`Capture is active, but AI analysis could not start: ${error.message || 'run npm run setup:ai and restart MSAS.'}`); }
   } catch (error) {
     if (token !== generation) return;
     const message = captureErrorMessage(error, stage);

@@ -2,9 +2,12 @@ const { app, BrowserWindow, desktopCapturer, ipcMain, screen, session, protocol 
 const path = require('node:path');
 const { assetResponse } = require('./assets.cjs');
 const { createTabBridge } = require('./tab-bridge.cjs');
+const { AiBridge } = require('./ai-bridge.cjs');
 protocol.registerSchemesAsPrivileged([{ scheme: 'msas', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } }]);
 
-let mainWindow, borderWindow, controlsWindow;
+let mainWindow, borderWindow, controlsWindow, analysisWindow;
+let aiBridge = null;
+let lastAnalysisEvent = { type: 'booting' };
 let captureChoice = null;
 let sources = new Map();
 let displayId = null;
@@ -26,11 +29,14 @@ function trustedMain(event) {
 function trustedControls(event) {
   return controlsWindow && event.sender === controlsWindow.webContents && event.senderFrame === controlsWindow.webContents.mainFrame;
 }
+function trustedAnalysis(event) {
+  return analysisWindow && event.sender === analysisWindow.webContents && event.senderFrame === analysisWindow.webContents.mainFrame;
+}
 function guard(event, controls = false) {
   if (!trustedMain(event) && !(controls && trustedControls(event))) throw new Error('Unauthorized request');
 }
 function sendState() {
-  for (const win of [mainWindow, borderWindow, controlsWindow]) {
+  for (const win of [mainWindow, borderWindow, controlsWindow, analysisWindow]) {
     if (win && !win.isDestroyed()) win.webContents.send('session:state', state);
   }
 }
@@ -58,14 +64,20 @@ function positionOverlays(expanded = false) {
   borderWindow.setBounds(display.bounds);
   const { x, y, width } = display.workArea;
   controlsWindow.setBounds({ x: x + width - 380, y: y + 24, width: 356, height: expanded ? 480 : 112 });
+  if (analysisWindow && !analysisWindow.isDestroyed()) {
+    const current = analysisWindow.getBounds();
+    analysisWindow.setBounds({ x: x + 24, y: y + 24, width: 410, height: current.height });
+  }
 }
 function createOverlays() {
   borderWindow = secureWindow({ title: 'MSAS Border', frame: false, transparent: true, resizable: false,
     focusable: false, skipTaskbar: true, show: false, hasShadow: false });
   controlsWindow = secureWindow({ title: 'MSAS Floating Controls', frame: false, transparent: true,
     resizable: false, skipTaskbar: true, show: false, hasShadow: false });
+  analysisWindow = secureWindow({ title: 'MSAS Live Understanding', frame: false, transparent: true,
+    resizable: false, skipTaskbar: true, show: false, hasShadow: true, width: 410, height: 620 });
   borderWindow.setIgnoreMouseEvents(true);
-  for (const win of [borderWindow, controlsWindow]) {
+  for (const win of [borderWindow, controlsWindow, analysisWindow]) {
     win.setAlwaysOnTop(true, 'screen-saver');
     win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
     win.webContents.on('did-finish-load', () => { sendState(); if (active) win.showInactive(); });
@@ -73,6 +85,8 @@ function createOverlays() {
   positionOverlays();
   borderWindow.loadURL('msas://app/overlay.html?role=border');
   controlsWindow.loadURL('msas://app/overlay.html?role=controls');
+  analysisWindow.loadURL('msas://app/analysis-overlay.html');
+  analysisWindow.webContents.on('did-finish-load', () => analysisWindow?.webContents.send('analysis:event', lastAnalysisEvent));
 }
 function startSession(mode) {
   active = true;
@@ -85,13 +99,15 @@ function startSession(mode) {
 function stopSession() {
   captureGeneration++;
   tabBridge?.close(); tabBridge = null; tabSession = null;
+  aiBridge?.stop(); aiBridge = null;
+  lastAnalysisEvent = { type: 'booting' };
   active = false;
   captureChoice = null;
   sources.clear();
   state = { mode: 'idle', cue: null, source: '', audio: false };
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('capture:stop');
-  for (const win of [borderWindow, controlsWindow]) if (win && !win.isDestroyed()) win.destroy();
-  borderWindow = controlsWindow = null;
+  for (const win of [borderWindow, controlsWindow, analysisWindow]) if (win && !win.isDestroyed()) win.destroy();
+  borderWindow = controlsWindow = analysisWindow = null;
   sendState();
 }
 
@@ -183,6 +199,43 @@ app.whenReady().then(() => {
     state = { ...state, mode: 'live', audio: audio === true };
     createOverlays();
     sendState();
+  });
+  ipcMain.handle('analysis:start', async event => {
+    guard(event);
+    if (state.mode !== 'live') throw new Error('Start a call capture before analysis.');
+    if (!aiBridge) {
+      aiBridge = new AiBridge(path.join(__dirname, '..'), message => {
+        lastAnalysisEvent = message;
+        if (analysisWindow && !analysisWindow.isDestroyed()) analysisWindow.webContents.send('analysis:event', message);
+      });
+      await aiBridge.start();
+    }
+    return { ok: true };
+  });
+  ipcMain.on('analysis:audio', (event, bytes) => {
+    if (!trustedMain(event) || !aiBridge) return;
+    try { aiBridge.sendAudio(bytes); } catch { /* malformed renderer input is ignored */ }
+  });
+  ipcMain.on('analysis:frame', (event, bytes) => {
+    if (!trustedMain(event) || !aiBridge) return;
+    try { aiBridge.sendFrame(bytes); } catch { /* malformed renderer input is ignored */ }
+  });
+  ipcMain.on('analysis:face', (event, reading) => {
+    if (!trustedMain(event) || !reading || typeof reading !== 'object') return;
+    const allowed = ['joy', 'surprise', 'sadness', 'anger', 'disgust', 'fear', 'neutral'];
+    const values = Object.fromEntries(allowed.map(name => [name, Math.max(0, Math.min(1, Number(reading.values?.[name]) || 0))]));
+    const message = { type: 'face', values, status: String(reading.status || 'uncertain').slice(0, 30) };
+    if (analysisWindow && !analysisWindow.isDestroyed()) analysisWindow.webContents.send('analysis:event', message);
+  });
+  ipcMain.on('analysis:input', (event, input) => {
+    if (!trustedMain(event) || !input || typeof input !== 'object') return;
+    const message = { type: 'input', audio: input.audio === true, face: input.face === true };
+    if (analysisWindow && !analysisWindow.isDestroyed()) analysisWindow.webContents.send('analysis:event', message);
+  });
+  ipcMain.handle('analysis:resize', (event, expanded) => {
+    if (!trustedAnalysis(event) || !analysisWindow || analysisWindow.isDestroyed()) throw new Error('Unauthorized request');
+    const bounds = analysisWindow.getBounds();
+    analysisWindow.setBounds({ ...bounds, width: 410, height: expanded === false ? 88 : 620 });
   });
   ipcMain.handle('session:stop', event => { guard(event, true); stopSession(); });
   ipcMain.handle('demo:start', event => {

@@ -3,7 +3,7 @@ const fs = require('node:fs/promises');
 
 // Expose only the app and the three enabled models, never arbitrary repo files.
 const routes = new Map([
-  ...['index.html', 'styles.css', 'app.js', 'tab-capture.js', 'face-analysis.js', 'face-state.js', 'face-worker.js', 'overlay.html', 'overlay.css', 'overlay.js'].map(name => [`/${name}`, `src/${name}`]),
+  ...['index.html', 'styles.css', 'app.js', 'tab-capture.js', 'face-analysis.js', 'face-state.js', 'face-worker.js', 'live-analysis.js', 'audio-worklet.js', 'overlay.html', 'overlay.css', 'overlay.js', 'analysis-overlay.html', 'analysis-overlay.css', 'analysis-overlay.js'].map(name => [`/${name}`, `src/${name}`]),
   ['/vendor/human.js', 'node_modules/@vladmandic/human/dist/human.js'],
   ...['blazeface', 'facemesh', 'emotion'].flatMap(name => ['json', 'bin'].map(ext => [`/models/${name}.${ext}`, `node_modules/@vladmandic/human/models/${name}.${ext}`]))
 ]);

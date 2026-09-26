@@ -54,7 +54,9 @@ class PipelineCoordinator:
         user_mic_capture: Optional[UserMicrophoneCapture] = None,
         memory: Optional[ConversationMemory] = None,
         jsd_threshold: float = JSD_THRESHOLD,
-        channel_status_callback: Optional[Callable[[Dict[str, str]], None]] = None
+        channel_status_callback: Optional[Callable[[Dict[str, str]], None]] = None,
+        result_callback: Optional[Callable[[Dict], None]] = None,
+        user_vad_detector: Optional[VADDetector] = None
     ):
         self.audio = audio_capture
         self.screen = screen_capture
@@ -64,6 +66,7 @@ class PipelineCoordinator:
         self.speech_state_cb = speech_state_callback
         self.status_cb = status_callback
         self.channel_status_cb = channel_status_callback
+        self.result_cb = result_callback
         self.jsd_threshold = jsd_threshold
 
         # Per-speaker baselines: voice and face are compared with this speaker's own usual
@@ -75,7 +78,7 @@ class PipelineCoordinator:
         # Two-Way Conversational Memory & User Mic
         self.memory = memory or ConversationMemory(max_turns=6)
         self.user_mic = user_mic_capture or UserMicrophoneCapture()
-        self.user_vad = VADDetector(silence_threshold_ms=450)
+        self.user_vad = user_vad_detector or VADDetector(silence_threshold_ms=450)
 
         # Perception Pipelines
         self.semantic_pipeline = SemanticPipeline(lazy_load=True)
@@ -321,7 +324,7 @@ class PipelineCoordinator:
                 except Exception as e:
                     logger.error(f"Error in cue callback: {e}")
 
-            return {
+            result = {
                 "transcript": transcript,
                 "p_video": p_video,
                 "p_audio": p_audio,
@@ -331,6 +334,12 @@ class PipelineCoordinator:
                 "channel_status": channel_status,
                 "cue_data": cue_data
             }
+            if self.result_cb is not None:
+                try:
+                    self.result_cb(result)
+                except Exception as e:
+                    logger.error(f"Error in result callback: {e}")
+            return result
 
         except Exception as e:
             logger.error(f"Error in process_utterance: {e}", exc_info=True)

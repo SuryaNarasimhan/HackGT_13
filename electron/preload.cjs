@@ -20,6 +20,13 @@ contextBridge.exposeInMainWorld('msas', {
   expand: expanded => ipcRenderer.invoke('overlay:expand', expanded),
   showMain: () => ipcRenderer.invoke('window:show'),
   minimize: () => ipcRenderer.invoke('window:minimize'),
+  startAnalysis: () => ipcRenderer.invoke('analysis:start'),
+  sendAnalysisAudio: bytes => ipcRenderer.send('analysis:audio', bytes),
+  sendAnalysisFrame: bytes => ipcRenderer.send('analysis:frame', bytes),
+  sendAnalysisFace: reading => ipcRenderer.send('analysis:face', reading),
+  setAnalysisInput: input => ipcRenderer.send('analysis:input', input),
+  resizeAnalysis: expanded => ipcRenderer.invoke('analysis:resize', expanded),
+  onAnalysisEvent: listener => subscribe('analysis:event', listener),
   onState: listener => subscribe('session:state', listener),
   onStop: listener => subscribe('capture:stop', listener)
 });

@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>MSAS Live Understanding</title>
+  <link rel="stylesheet" href="./analysis-overlay.css">
+</head>
+<body>
+  <main class="panel" id="panel">
+    <header class="titlebar">
+      <div class="mark">m↗</div>
+      <div><h1>Live understanding</h1><p id="status">Starting local analysis…</p></div>
+      <span class="pulse" id="pulse" aria-hidden="true"></span>
+      <button id="collapse" aria-label="Collapse analysis">−</button>
+    </header>
+    <div class="content" id="content">
+      <section class="inputs" aria-label="Analysis inputs">
+        <span id="audio-input">○ Call audio</span><span id="face-input">○ Participant</span>
+      </section>
+      <section class="channels" aria-label="Detection predictions">
+        <article><span class="glyph">◌</span><div><small>FACIAL</small><strong id="face-label">Waiting</strong></div><b id="face-score">—</b></article>
+        <article><span class="glyph">∿</span><div><small>VOCAL TONE</small><strong id="tone-label">Waiting</strong></div><b id="tone-score">—</b></article>
+        <article><span class="glyph">“</span><div><small>WORDS</small><strong id="words-label">Waiting</strong></div><b id="words-score">—</b></article>
+      </section>
+      <p class="score-note">Scores show model confidence, not certainty about a person’s feelings.</p>
+      <section class="transcript">
+        <div class="section-label"><span>TRANSCRIPT</span><span id="speech">Listening</span></div>
+        <blockquote id="transcript">Conversation text will appear after someone speaks.</blockquote>
+      </section>
+      <section class="meaning" id="meaning">
+        <div class="meaning-head"><span id="cue-type">Likely meaning</span><em id="cue-confidence">Waiting</em></div>
+        <p id="explanation">MSAS combines the face, voice, and words after each utterance.</p>
+        <p class="suggestion" id="suggestion">Keep talking naturally.</p>
+        <footer><span id="source">Local analysis</span><span id="jsd">Agreement —</span></footer>
+      </section>
+      <p class="privacy">Processed live on this laptop · recordings are not stored</p>
+    </div>
+  </main>
+  <script src="./analysis-overlay.js"></script>
+</body>
+</html>

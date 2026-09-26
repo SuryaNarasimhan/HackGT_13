@@ -220,4 +220,5 @@ __marimo__/
 # Desktop dependencies and generated artifacts
 node_modules/
 coverage/
+tests/output/
 *.log

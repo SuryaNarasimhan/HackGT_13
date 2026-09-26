@@ -24,21 +24,21 @@ The extension runs capture in an offscreen document, so closing its popup does n
 
 The signaling listener binds only to `127.0.0.1:47831`, requires a random per-session token, and exists only during pairing/capture. It validates Host, supplied Origin, client ID, and bounded messages. Signaling carries connection descriptions; media travels over a same-machine WebRTC peer connection with no STUN/TURN servers. No media recording or persistent pairing storage is created. Stop clears the preview, facial analysis, peer, pairing code and listener. The extension releases its tracks when the connection ends. If the port is busy, close other MSAS instances.
 
-Verification: all 12 unit checks and syntax checks passed. An actual unpacked Edge extension was exercised through its popup with a changing synthetic tab. WebRTC delivered its video to the app renderer, pixels continued changing after setting the source window to minimized in a headless browser test, and app Stop ended extension sharing. Electron IPC was simulated in this test; a native Electron plus live Meet session is still a manual Windows acceptance check. Other call platforms are not yet validated.
+Verification: all 15 Node unit checks, all 72 Python checks, JavaScript syntax checks, and the Electron-to-Python boot/ready handshake pass. An actual unpacked Edge extension was exercised through its popup with a changing synthetic tab. WebRTC delivered its video to the app renderer, pixels continued changing after setting the source window to minimized in a headless browser test, and app Stop ended extension sharing. A native Electron plus live Meet session is still a manual Windows acceptance check. Other call platforms are not yet validated.
 
-## Speaker-baseline AI backend
+## Live multimodal AI overlay
 
 The merged `app/` package contains the Python multimodal pipeline from the `speaker-baseline` branch. It learns an in-memory voice and face baseline for the current speaker, marks readings as warming up, usual, changed, or unavailable, and only uses informative channels when calculating cross-modal mismatch. This avoids treating a naturally flat voice, a rarely smiling face, missing video, or unclear speech as evidence of hidden meaning.
 
-The Python backend and the Electron companion currently have separate entry points. Merging the branch preserves both working prototypes; it does not yet route the Electron tab stream into the Python coordinator or display Python cue results in the Electron UI. The Electron app remains the default `npm start` experience. To run the Python overlay separately on Windows:
+The Electron companion now sends the opted-in call audio and only the participant crop selected in the preview to the Python coordinator. A separate, draggable translucent overlay shows facial, vocal-tone, and word predictions with model scores, the live transcript, cross-signal difference, and the social-cue explanation. It also shows whether each input is connected and whether the per-speaker baseline is still warming up.
+
+Install the Python backend once:
 
 ```powershell
-uv sync
-Copy-Item .env.example .env
-uv run sociallens --demo
+npm run setup:ai
 ```
 
-`GEMINI_API_KEY` is optional for the deterministic/offline fallback. Live mode is `uv run sociallens`; it uses Windows audio/screen capture and may download local ML models on first use. Run the backend checks with `uv run pytest`. Do not claim end-to-end Electron/backend integration until the media and cue IPC boundary is implemented and tested.
+`GEMINI_API_KEY` is optional. Without it, the overlay uses the local rule-based explanation. With it, the transcript, recent conversation, and derived signal scores are sent to Gemini for an explanation; raw audio and video are not sent to Gemini by this application. The Electron bridge never opens the laptop microphone and creates no recording files. Run backend checks with `.\.venv\Scripts\python.exe -m pytest` after setup.
 
 ## Run locally
 
@@ -49,7 +49,7 @@ npm install
 npm start
 ```
 
-This launches a native Electron window, not a localhost website. No web server, account, or AI API key is needed. `npm run check` checks JavaScript syntax. The lockfile pins dependencies; use `npm ci` for repeat installs.
+This launches a native Electron window, not a localhost website. No web server or account is needed. The optional Gemini explanation requires `GEMINI_API_KEY`; local fallback works without it. `npm run check` checks JavaScript syntax. The lockfile pins dependencies; use `npm ci` for repeat installs.
 
 On this checkout, Electron is already downloaded. If npm is not on your terminal's PATH, launch the installed binary directly from PowerShell:
 
@@ -69,11 +69,12 @@ Native desktop verification remains incomplete: Electron's GPU/renderer subproce
 - Desktop setup interface with optional, explicitly entered language and cultural context.
 - Window/screen selection, local video preview, and opt-in system-output audio capture.
 - Audio level meter that distinguishes a present track from a sustained lack of signal. Captured audio is never played back, avoiding feedback.
-- A click-through border and a separate interactive panel above other windows. The controls can expand explanations, return to setup, and stop the session.
+- A click-through border, floating session controls, and a separate translucent live-understanding overlay above other windows.
 - Local facial landmarks and tentative expression estimates for a selected participant.
+- Electron-to-Python streaming for selected-participant frames and opted-in call audio, with transcription, tone/semantic predictions, speaker baseline status, fusion, and Gemini or local-fallback explanations.
 - Stop/close cleanup: media tracks stop, audio analysis closes, overlays disappear, and context fields clear. Demo mode never captures a call.
 
-**Not implemented:** transcription, vocal-tone inference, sarcasm or other social-cue interpretations, translated output, packaged installers, code signing, or automatic tracking of a participant/window across monitors. Context fields are session-only UI inputs reserved for the later inference pipeline; they do not change the scripted demo.
+**Not implemented:** translated output, packaged installers, code signing, automatic tracking of a participant/window across layout changes, and use of the Context fields in inference. The user must select one participant crop; interpretations remain tentative model output.
 
 ## Google Meet trial on Windows
 
@@ -100,7 +101,7 @@ After updating, fully quit and relaunch MSAS; refreshing the renderer alone does
 
 ## Privacy and application boundaries
 
-This version performs no remote inference and sends no captured content to a server. It creates no media recordings and has no transcript database, analytics, or content logging. Source thumbnails and previews exist in memory; runtime preferences/caches managed by Electron or the OS are distinct from a guarantee of forensic erasure.
+By default this version performs local processing and sends no call content to a server. If the user explicitly provides `GEMINI_API_KEY`, the transcript, recent text context, and derived scores are sent to Gemini for the displayed explanation. Raw audio and video remain local. The app creates no media recordings and has no transcript database, analytics, or content logging. Source thumbnails, audio chunks, frames, transcripts, and model state exist in memory for the active session; runtime caches managed by dependencies, Electron, or the OS are distinct from a guarantee of forensic erasure.
 
 The renderer uses an in-memory session partition, a restrictive content security policy, context isolation, sandboxing, and a narrow preload API. Navigation and new windows are blocked. Only the main setup window can authorize capture. The passive border cannot invoke privileged actions. System audio is opt-in and microphone access is not granted.
 
@@ -108,15 +109,17 @@ Source enumeration generates transient thumbnails before capture begins, after t
 
 ## Layout
 
-- `electron/main.cjs`: window lifecycle, source selection, capture authorization, session state, and scripted examples.
+- `electron/main.cjs`, `electron/ai-bridge.cjs`: window lifecycle, capture authorization, Python process lifecycle, and bounded media IPC.
 - `electron/preload.cjs`: explicit renderer-to-main bridge.
-- `src/index.html`, `src/app.js`, `src/styles.css`: setup interface, media lifecycle, and audio meter.
+- `src/index.html`, `src/app.js`, `src/live-analysis.js`: setup interface, media lifecycle, audio resampling, and selected-participant frame sampling.
 - `src/overlay.html`, `src/overlay.js`, `src/overlay.css`: passive border and interactive floating panel.
+- `src/analysis-overlay.*`: translucent multimodal predictions, transcript, and explanation panel.
+- `app/electron_bridge.py`: NDJSON adapter from Electron media into the Python coordinator.
 - `docs/architecture.md`: product architecture and next implementation stages.
 
 ## Before claiming a working AI demo
 
-Connect the actual transcription and interpretation pipeline, preserve abstention, validate provider privacy settings if remote inference is used, and measure cue latency and accuracy. Local expression inference works; interpretation of speech and intended meaning is still pending.
+Run a consented Google Meet trial on the demo laptop, validate transcription and end-to-end cue latency, and test clear, ambiguous, quiet, and missing-face cases. If Gemini is enabled, review its current data handling and the event-specific hackathon rules before presenting the remote explanation path.
 
 ## Local expression analysis
 

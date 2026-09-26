@@ -6,8 +6,10 @@
   "main": "electron/main.cjs",
   "scripts": {
     "start": "electron .",
-    "check": "node --check electron/main.cjs && node --check electron/assets.cjs && node --check electron/preload.cjs && node --check src/app.js && node --check src/face-analysis.js && node --check src/face-worker.js && node --check src/face-state.js && node --check src/overlay.js && node --check electron/tab-bridge.cjs && node --check src/tab-capture.js && node --check extension/background.js && node --check extension/offscreen.js && node --check extension/popup.js",
-    "test": "node --test tests/*.test.cjs"
+    "setup:ai": "powershell -ExecutionPolicy Bypass -File scripts/setup-ai.ps1",
+    "check": "node --check electron/main.cjs && node --check electron/assets.cjs && node --check electron/preload.cjs && node --check electron/ai-bridge.cjs && node --check src/app.js && node --check src/live-analysis.js && node --check src/analysis-overlay.js && node --check src/face-analysis.js && node --check src/face-worker.js && node --check src/face-state.js && node --check src/overlay.js && node --check electron/tab-bridge.cjs && node --check src/tab-capture.js && node --check extension/background.js && node --check extension/offscreen.js && node --check extension/popup.js",
+    "test": "node --test tests/*.test.cjs",
+    "test:python": ".venv\\Scripts\\python.exe -m pytest"
   },
   "engines": {
     "node": ">=22.12.0"
