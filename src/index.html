@@ -9,41 +9,49 @@
   <script src="app.js" defer></script>
 </head>
 <body>
-  <aside class="sidebar">
-    <a class="brand" href="#"><span class="brand-mark">m<span>↗</span></span><span>MSAS<small>BETTER UNDERSTANDING</small></span></a>
-    <div class="workspace-label">YOUR COMPANION</div>
-    <div class="nav-item selected"><span>◉</span> Conversation <span class="nav-dot"></span></div>
-    <a class="nav-item" href="#context"><span>◎</span> Your context</a>
-    <a class="nav-item" href="#privacy"><span>◇</span> Privacy &amp; controls</a>
-    <div class="sidebar-note"><span class="small-icon">✳</span><h3>A little more clarity.</h3><p>Stay in the conversation.<br>We’ll make space for the nuances.</p><button id="sidebar-demo" class="text-button">Explore the demo <span>↗</span></button></div>
-    <div class="sidebar-footer"><span class="status-dot"></span> On your device <small>DESKTOP PREVIEW · 0.1</small></div>
-  </aside>
   <main>
-    <header><div class="breadcrumb">Your workspace <span>/</span> Conversation</div><span class="local-pill">◇ &nbsp; Local session</span></header>
-    <section class="page-heading"><div><div class="eyebrow">MORE CONNECTION. LESS GUESSWORK.</div><h1>Find the meaning<br>between the words<span>.</span></h1><p>Your quiet companion for the moments that need a little context.</p></div><div class="heading-art" aria-hidden="true"><span class="orb one">“</span><span class="orb two">”</span><i></i></div></section>
-    <div class="topline"><h2>Your conversation</h2><span id="session-status" class="status-pill" role="status"><span class="status-dot"></span> Ready when you are</span></div>
+    <header class="app-header"><h1>MSAS</h1><span id="session-status" class="status" role="status">Ready</span></header>
     <div id="notice" class="notice" role="alert" hidden></div>
     <div class="content-grid">
-      <section class="card capture-card">
-        <div class="card-heading"><h3><span class="heading-icon">▣</span> Call source</h3><span class="subtle-label">ANY CALL. ONE COMPANION.</span></div>
-        <div class="preview" id="preview"><video id="video" autoplay muted playsinline hidden></video><div id="preview-empty"><div class="monitor-icon"><span>↗</span></div><h3>Keep calling your way.</h3><p>Choose the window or screen with your call.<br>MSAS stays alongside it.</p><button id="choose-source" class="button secondary">Choose a call source <span>＋</span></button></div><div class="preview-tag" id="preview-tag">WINDOW OR SCREEN</div></div>
-        <div class="source-summary"><div><span class="status-dot" id="source-dot"></span><strong id="source-name">No source selected</strong><small id="source-caption">Google Meet is our first trial. No browser extension needed.</small></div><button class="text-button" id="change-source" disabled>Change</button></div>
-        <div class="audio-row"><div><label for="system-audio">Include system audio</label><p>May include sounds from other apps. Microphone stays off.</p></div><input id="system-audio" type="checkbox" class="switch" aria-label="Include system audio"></div>
+      <section class="panel capture-panel" aria-labelledby="source-heading">
+        <div class="panel-heading"><h2 id="source-heading">Call source</h2></div>
+        <div class="preview" id="preview">
+          <video id="video" autoplay muted playsinline aria-label="Live preview of the selected call window" hidden></video>
+          <div id="preview-empty"><p>Select the window with your call.</p><button id="choose-source" class="button secondary">Choose window or screen</button></div>
+        </div>
+        <div class="source-summary"><span id="source-name">No source selected</span><button class="text-button" id="change-source" disabled>Change</button></div>
+        <div class="audio-row">
+          <div><label for="system-audio">System audio</label><p id="audio-description">Includes other apps’ sound. Microphone stays off.</p></div>
+          <input id="system-audio" type="checkbox" class="switch" aria-describedby="audio-description">
+        </div>
         <div id="audio-status" class="audio-status" hidden><span id="audio-label">Waiting for audio</span><meter id="audio-meter" min="0" max="1" value="0" aria-label="System audio level"></meter></div>
-        <div class="capture-actions"><button id="start" class="button primary" disabled><span>◉</span> Start companion</button><button id="stop" class="button stop" hidden>Stop session</button><button id="minimize" class="button secondary" hidden>Return to call ↗</button><span id="start-hint">You’re in control of what’s shared.</span></div>
+        <div class="capture-actions">
+          <button id="start" class="button primary" disabled>Start companion</button>
+          <button id="stop" class="button stop" hidden>Stop session</button>
+          <button id="minimize" class="button secondary" hidden>Return to call</button>
+        </div>
       </section>
-      <section class="card context-card" id="context"><div class="card-heading"><h3><span class="heading-icon">◎</span> A little context</h3><span class="optional-pill">Optional</span></div><p class="card-intro">Meaning is personal. Tell us what’s helpful to know.</p>
-        <fieldset id="context-fields"><label for="language">Your language</label><select id="language"><option>English</option><option>Spanish</option><option>Hindi</option><option>Mandarin Chinese</option><option>Korean</option><option>Other / prefer not to say</option></select><label for="region">Your region or cultural context</label><input id="region" placeholder="e.g. India, United States, or leave blank" maxlength="120"><label for="speaker-context">Speaker’s context <span>IF KNOWN</span></label><input id="speaker-context" placeholder="Only what they’ve shared with you" maxlength="160"></fieldset>
-        <div class="context-note"><span>◇</span><p>Always provided by you.<br>Never guessed from a face or accent.</p></div><p class="prototype-note">Settings stay in this session. AI integration and translated output are not connected yet.</p>
+      <section class="panel context-panel" id="context" aria-labelledby="context-heading">
+        <div class="panel-heading"><h2 id="context-heading">Context</h2><span class="optional">Optional</span></div>
+        <fieldset id="context-fields" aria-label="Conversation context">
+          <label for="language">Your language</label>
+          <select id="language"><option>English</option><option>Spanish</option><option>Hindi</option><option>Mandarin Chinese</option><option>Korean</option><option>Other / prefer not to say</option></select>
+          <label for="region">Your region</label>
+          <input id="region" placeholder="e.g. India or United States" maxlength="120">
+          <label for="speaker-context">Speaker’s context, if known</label>
+          <input id="speaker-context" placeholder="Language, region, or other context" maxlength="160">
+        </fieldset>
+        <p class="context-note">Only what you choose to share. Never inferred from a face or accent.</p>
+        <p class="prototype-note">AI isn’t connected yet. These settings are saved only for this session.</p>
       </section>
     </div>
-    <section class="card insight-card"><div class="insight-heading"><div><div class="eyebrow">A GENTLE NUDGE, WHEN YOU NEED IT</div><h2>Clarity without the interruption.</h2></div><button id="demo" class="button secondary">Try a simulated cue <span>↗</span></button><button id="next-demo" class="button secondary" hidden>Next example →</button></div>
-      <div class="cue-legend"><span><i class="cue-dot sarcasm"></i> Sarcasm</span><span><i class="cue-dot idiom"></i> Idioms</span><span><i class="cue-dot slang"></i> Slang</span><span><i class="cue-dot joke"></i> Jokes</span><span class="legend-note">A color + a label. An explanation when you want it.</span></div>
-      <div id="cue-empty" class="cue-empty"><span>✧</span><p>Your conversation stays yours.<br><small>Live capture is available. AI cue detection is not connected in this preview.</small></p></div>
-      <article id="cue-card" class="cue-detail" hidden><div class="cue-title"><strong id="cue-label"></strong><span class="demo-pill">SIMULATED · NOT FROM YOUR CALL</span></div><blockquote id="cue-quote"></blockquote><p id="cue-meaning"></p><details><summary>Why this reading?</summary><p id="cue-evidence"></p><p><strong>Another possibility: </strong><span id="cue-alternative"></span></p></details></article>
-    </section>
-    <footer id="privacy"><span>◇</span><p><strong>In the moment. In your control.</strong> This prototype sends no call content to a server and creates no recordings. Stop clears the preview and session settings.</p><span class="footer-label">BUILT FOR HUMAN CONNECTION</span></footer>
+    <footer>No recordings or uploads. Stop clears the preview and session settings.</footer>
   </main>
-  <dialog id="source-dialog"><div class="dialog-heading"><div><div class="eyebrow">YOU CHOOSE WHAT WE SEE</div><h2>Select your call source</h2></div><button id="close-picker" class="icon-button" aria-label="Close source picker">×</button></div><p>Select the window containing your call, or a screen. Screen capture includes everything visible on that display.</p><div id="source-list" class="source-list"></div><div class="dialog-footer"><span>Window selection does not isolate system audio.</span><button id="refresh-sources" class="button secondary">Refresh sources</button></div></dialog>
+  <dialog id="source-dialog" aria-labelledby="picker-heading" aria-describedby="picker-description">
+    <div class="dialog-heading"><h2 id="picker-heading">Choose a call source</h2><button id="close-picker" class="icon-button" aria-label="Close source picker">×</button></div>
+    <p id="picker-description">Select a window, or a screen to capture everything visible on it.</p>
+    <div id="source-list" class="source-list" aria-live="polite"></div>
+    <div class="dialog-footer"><span>System audio may include other apps.</span><button id="refresh-sources" class="button secondary">Refresh</button></div>
+  </dialog>
 </body>
 </html>

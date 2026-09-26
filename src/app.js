@@ -17,28 +17,16 @@ function clearSession() {
   $('source-name').textContent = 'No source selected';
   $('language').selectedIndex = 0; $('region').value = ''; $('speaker-context').value = '';
   $('system-audio').checked = false;
-  $('cue-label').textContent = ''; $('cue-quote').textContent = ''; $('cue-meaning').textContent = '';
-  $('cue-evidence').textContent = ''; $('cue-alternative').textContent = '';
 }
 function render(state) {
   currentMode = state.mode; lastState = state;
-  const idle = state.mode === 'idle', demo = state.mode === 'demo';
-  $('session-status').textContent = ({ idle: '○  Ready when you are', starting: '◉  Connecting capture…', live: '●  Capture active · AI not connected', demo: '✧  Simulated walkthrough' })[state.mode];
+  const idle = state.mode === 'idle';
+  $('session-status').textContent = ({ idle: 'Ready', starting: 'Connecting…', live: 'Capture active · AI not connected', demo: 'Simulated session' })[state.mode];
   $('session-status').dataset.active = String(!idle);
   $('start').hidden = !idle; $('start').disabled = !selected;
   $('stop').hidden = idle; $('minimize').hidden = idle;
   $('choose-source').disabled = !idle; $('change-source').disabled = !idle || !selected;
   $('system-audio').disabled = !idle; $('context-fields').disabled = !idle;
-  $('demo').hidden = demo; $('demo').disabled = !idle;
-  $('sidebar-demo').disabled = !idle; $('next-demo').hidden = !demo;
-  $('start-hint').hidden = !idle;
-  $('preview-tag').textContent = demo ? 'DEMO · NO CAPTURE' : state.mode === 'live' ? 'LIVE CAPTURE · NOT RECORDED' : 'WINDOW OR SCREEN';
-  $('cue-empty').hidden = !!state.cue; $('cue-card').hidden = !state.cue;
-  if (state.cue) {
-    $('cue-label').textContent = state.cue.label; $('cue-quote').textContent = state.cue.quote;
-    $('cue-meaning').textContent = state.cue.meaning; $('cue-evidence').textContent = state.cue.evidence;
-    $('cue-alternative').textContent = state.cue.alternative;
-  }
 }
 async function loadSources() {
   $('source-list').textContent = 'Finding available windows and screens…';
@@ -166,7 +154,5 @@ if (!api) {
   $('start').addEventListener('click', startCapture);
   $('stop').addEventListener('click', () => { notice(); api.stop(); });
   $('minimize').addEventListener('click', () => api.minimize());
-  for (const id of ['demo', 'sidebar-demo']) $(id).addEventListener('click', () => { notice(); api.startDemo().catch(error => notice(error.message)); });
-  $('next-demo').addEventListener('click', () => api.nextDemo());
   window.addEventListener('beforeunload', releaseMedia);
 }
