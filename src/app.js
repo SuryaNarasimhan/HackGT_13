@@ -1,10 +1,14 @@
 const $ = id => document.getElementById(id);
 const api = window.msas;
+const faceAnalysis = window.FaceAnalysis.create($('video'));
 let selected = null, stream = null, audioContext = null, audioTimer = null;
 let generation = 0, currentMode = 'idle', lastState = null;
+const tabCapture = api ? window.TabCapture.create(api, receiveTabStream, async message => { await api.stop(); notice(message); }) : null;
 
 function notice(message = '') { $('notice').textContent = message; $('notice').hidden = !message; }
 function releaseMedia() {
+  tabCapture?.stop();
+  faceAnalysis.stop();
   generation++;
   if (stream) { stream.getTracks().forEach(track => { track.onended = null; track.stop(); }); stream = null; }
   clearInterval(audioTimer); audioTimer = null;
@@ -17,16 +21,45 @@ function clearSession() {
   $('source-name').textContent = 'No source selected';
   $('language').selectedIndex = 0; $('region').value = ''; $('speaker-context').value = '';
   $('system-audio').checked = false;
+  $('tab-pairing').hidden = true; $('pairing-code').value = '';
 }
 function render(state) {
   currentMode = state.mode; lastState = state;
   const idle = state.mode === 'idle';
-  $('session-status').textContent = ({ idle: 'Ready', starting: 'Connecting…', live: 'Capture active · AI not connected', demo: 'Simulated session' })[state.mode];
+  $('session-status').textContent = ({ idle: 'Ready', starting: 'Connecting…', live: 'Capture active', demo: 'Simulated session' })[state.mode];
+  faceAnalysis.setLive(state.mode === 'live');
   $('session-status').dataset.active = String(!idle);
   $('start').hidden = !idle; $('start').disabled = !selected;
   $('stop').hidden = idle; $('minimize').hidden = idle;
   $('choose-source').disabled = !idle; $('change-source').disabled = !idle || !selected;
+  $('connect-tab').disabled = !idle;
   $('system-audio').disabled = !idle; $('context-fields').disabled = !idle;
+}
+async function connectTab() {
+  if (currentMode !== 'idle') return;
+  notice(); $('connect-tab').disabled = true;
+  const token = generation;
+  try {
+    const result = await tabCapture.start($('system-audio').checked);
+    if (token !== generation || currentMode !== 'starting') { tabCapture.stop(); return; }
+    selected = null;
+    $('source-name').textContent = 'Waiting for the browser extension';
+    $('pairing-code').value = result.token; $('tab-pairing').hidden = false;
+    $('pairing-code').focus(); $('pairing-code').select();
+  } catch (error) { notice(error.message || 'Could not start the browser connection.'); render(lastState); }
+}
+async function receiveTabStream(media) {
+  if (currentMode !== 'starting') { media.getTracks().forEach(track => track.stop()); return; }
+  const token = generation;
+  stream = media;
+  $('video').srcObject = media; $('video').hidden = false; $('preview-empty').hidden = true;
+  await captureTimeout($('video').play(), 'Browser video did not reach the preview.');
+  if (token !== generation) return;
+  $('source-name').textContent = 'Browser tab · live connection';
+  $('tab-pairing').hidden = true; $('pairing-code').value = '';
+  try { monitorAudio(media, $('system-audio').checked); }
+  catch { $('audio-label').textContent = 'Video active · audio meter unavailable'; }
+  await api.captureReady(media.getAudioTracks().length > 0);
 }
 async function loadSources() {
   $('source-list').textContent = 'Finding available windows and screens…';
@@ -147,6 +180,8 @@ if (!api) {
   document.querySelectorAll('button').forEach(button => { button.disabled = true; });
 } else {
   api.onState(render); api.onStop(clearSession); api.getState().then(render);
+  api.onTabError(notice);
+  $('connect-tab').addEventListener('click', connectTab);
   $('choose-source').addEventListener('click', openPicker); $('change-source').addEventListener('click', openPicker);
   $('refresh-sources').addEventListener('click', loadSources);
   $('close-picker').addEventListener('click', () => $('source-dialog').close());

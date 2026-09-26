@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Desktop dependencies and generated artifacts
+node_modules/
+coverage/
+*.log

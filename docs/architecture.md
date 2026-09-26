@@ -1,6 +1,16 @@
 # MSAS Architecture
 
-Status: Proposed AI architecture with an initial Electron desktop capture/UI prototype. AI analysis is not yet implemented.
+Status: Windows capture/UI and local facial-expression analysis implemented. Speech and social-cue fusion remain proposed.
+
+## Browser tab transport (implemented)
+
+Minimized-browser operation uses an optional Manifest V3 Edge extension. The user invokes it on the call tab and enters a short-lived pairing code from MSAS. A service worker obtains a tabCapture stream ID; an offscreen document owns the stream and WebRTC sender so capture survives popup closure. No Meet DOM selectors or credentials are used.
+
+Electron runs a temporary signaling server at 127.0.0.1:47831. Requests require a random 192-bit token and a client identifier, with Host and supplied Origin validation. Extension GET requests can omit Origin when host permissions apply, so authenticated requests without it are allowed. The first valid offer binds the session to that extension identifier. Only one offer and one bounded answer are accepted. Unused codes expire after two minutes; lost polling ends the session after ten seconds. The token authenticates; the client ID is not a secret.
+
+Trusted IPC relays the offer to the setup renderer and returns its answer. The received stream feeds the existing preview, participant selection and expression worker. No STUN/TURN or remote signaling service is used. Optional audio is tab-scoped; an extension AudioContext restores redirected call sound. Stop, tab/browser closure and connection failures release tracks and session resources. Capture follows the selected tab across navigation until stopped.
+
+OS capture remains available for other applications but cannot promise minimized-window video. The Edge extension adds no content scripts, account integration or stored call history. README records setup and verification, including the distinction between automated headless minimized-window testing and pending native Meet validation.
 
 ## Current prototype and first trial
 
@@ -10,7 +20,7 @@ The prototype provides a setup window, source picker, local video preview, opt-i
 
 The border appears on the selected screen, or on the setup window's display when a captured window has no display identifier. It does not track a moving call window. Stop, setup-window closure, capture termination, or display disconnection releases the session and removes overlays. Four scripted cue examples run in an explicitly labeled demo mode with no capture. Live capture never emits scripted interpretations.
 
-The transcript, acoustic interpretation, facial observations, model fusion, and evaluation sections below describe the intended system, not completed features. Windows call capture still requires a manual Google Meet trial; no universal call compatibility is claimed.
+The transcript, acoustic interpretation, model fusion, and evaluation sections below describe the intended system, not completed features. Local facial analysis is implemented as described below. Windows call capture still requires a manual Google Meet trial; no universal call compatibility is claimed.
 
 The selected source is granted through Electron's display-media handler. Electron 44 also makes a desktop `media` permission request with no physical device types before this handler runs. Permission checks allow that request only while an explicit capture is pending in the setup window's main frame; microphone/camera device requests remain denied. Live overlays are created after video playback starts. Startup and playback have bounded waits, late streams are stopped, and capture errors expose the failed stage and native error rather than a generic cross-platform message.
 
@@ -217,4 +227,14 @@ Use live inference in the working demo. If prerecorded inputs are used for repro
 5. Tune abstention and alert frequency; test cleanup, latency, accessibility, and failure states.
 6. Prepare the public repository, short project write-up, and consented demo video. Exclude secrets and private media.
 
-Electron is the selected desktop shell, with Windows as the first trial environment and operating-system capture as the integration boundary. Transcription, acoustic/visual analyzers, interpretation model, installer packaging, and any remote processing boundary remain open. Validate their latency, permissions, licensing, and retention behavior against this architecture. The current prototype uses local preview only and makes no inference-provider calls.
+Electron is the selected desktop shell, with Windows as the first trial environment and operating-system capture as the integration boundary. Transcription, acoustic/visual analyzers, interpretation model, installer packaging, and any remote processing boundary remain open. Validate their latency, permissions, licensing, and retention behavior against this architecture. The current prototype performs local expression inference and makes no inference-provider calls.
+
+## Implemented visual pipeline
+
+The user pins a participant in Google Meet and selects a rectangle in the captured preview. Letterbox-aware coordinates map to video pixels. A dedicated worker receives only the crop (maximum 480 pixels on its longest edge), one request at a time with no queued frames and 250 ms between completions. Human 3.3.6 runs bundled BlazeFace, 468-point face mesh, and expression models. All other models are disabled. WebGL has a CPU fallback.
+
+Expression smoothing requires three consistent observations, a top score of 0.65 and margin of 0.15. These engineering thresholds are not calibrated certainty. Weak detections, small/multiple/missing faces, timestamp gaps, discontinuous boxes, or stale results reset or withhold the label. Loading times out after 30 seconds; inference after 10 seconds; results older than 2.5 seconds are withheld.
+
+Assets are served through the explicit local msas://app allowlist with restrictive CSP. Remote HTTP/WebSocket traffic is blocked. Model caching is disabled. Stop, capture termination, reselection, and source-dimension changes clear observations and terminate inference. The fixed selection does not track identity; users must reselect after tile rearrangements. Results appear below the preview, not in the floating overlay. Context inputs do not change the expression model.
+
+Eight automated checks and a real browser-worker inference check passed, including a face with 468 landmarks and no-face output on subsequent blank input. Native capture plus inference requires a Windows Meet trial. Expression accuracy and future sarcasm interpretation remain unevaluated. See README for model attribution and manual checks.

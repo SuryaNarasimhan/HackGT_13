@@ -1,5 +1,8 @@
-const { app, BrowserWindow, desktopCapturer, ipcMain, screen, session } = require('electron');
+const { app, BrowserWindow, desktopCapturer, ipcMain, screen, session, protocol } = require('electron');
 const path = require('node:path');
+const { assetResponse } = require('./assets.cjs');
+const { createTabBridge } = require('./tab-bridge.cjs');
+protocol.registerSchemesAsPrivileged([{ scheme: 'msas', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } }]);
 
 let mainWindow, borderWindow, controlsWindow;
 let captureChoice = null;
@@ -7,6 +10,7 @@ let sources = new Map();
 let displayId = null;
 let active = false;
 let captureGeneration = 0;
+let tabBridge = null, tabSession = null;
 let state = { mode: 'idle', cue: null, source: '', audio: false };
 const demoCues = [
   { category: 'sarcasm', label: 'Possible sarcasm', quote: '“Great, another meeting that could have been an email.”', meaning: 'They may be expressing frustration about an unnecessary meeting.', evidence: 'The positive word “great” contrasts with the complaint that follows. This is a scripted example, not an analysis of your call.', alternative: 'They could be joking lightly rather than feeling seriously frustrated.' },
@@ -67,8 +71,8 @@ function createOverlays() {
     win.webContents.on('did-finish-load', () => { sendState(); if (active) win.showInactive(); });
   }
   positionOverlays();
-  borderWindow.loadFile(path.join(__dirname, '../src/overlay.html'), { query: { role: 'border' } });
-  controlsWindow.loadFile(path.join(__dirname, '../src/overlay.html'), { query: { role: 'controls' } });
+  borderWindow.loadURL('msas://app/overlay.html?role=border');
+  controlsWindow.loadURL('msas://app/overlay.html?role=controls');
 }
 function startSession(mode) {
   active = true;
@@ -80,6 +84,7 @@ function startSession(mode) {
 }
 function stopSession() {
   captureGeneration++;
+  tabBridge?.close(); tabBridge = null; tabSession = null;
   active = false;
   captureChoice = null;
   sources.clear();
@@ -92,6 +97,8 @@ function stopSession() {
 
 app.whenReady().then(() => {
   const captureSession = session.fromPartition('msas-volatile', { cache: false });
+  captureSession.protocol.handle('msas', request => assetResponse(request, path.join(__dirname, '..')));
+  captureSession.webRequest.onBeforeRequest({ urls: ['http://*/*', 'https://*/*', 'ws://*/*', 'wss://*/*'] }, (_details, callback) => callback({ cancel: true }));
   const pendingDesktopCapture = (contents, details) =>
     contents === mainWindow?.webContents && details?.isMainFrame === true &&
     active && state.mode === 'starting' && !!captureChoice;
@@ -137,6 +144,39 @@ app.whenReady().then(() => {
     state.source = source.name;
     startSession('starting');
   });
+  ipcMain.handle('tab:start', async (event, audio) => {
+    guard(event);
+    if (active) throw new Error('Stop the current session first.');
+    const id = ++captureGeneration;
+    tabSession = id; displayId = null;
+    state.source = 'Browser tab connection';
+    startSession('starting');
+    try {
+      const bridge = await createTabBridge({
+        audio: audio === true,
+        onSignal: message => {
+          if (tabSession === id && !mainWindow.isDestroyed()) mainWindow.webContents.send('tab:signal', { ...message, session: id });
+        },
+        onClose: message => {
+          if (tabSession !== id) return;
+          stopSession();
+          if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('tab:error', message);
+        }
+      });
+      if (tabSession !== id) { bridge.close(); throw new Error('Tab connection cancelled.'); }
+      tabBridge = bridge;
+      return { token: bridge.token, session: id };
+    } catch (error) {
+      if (tabSession === id) stopSession();
+      if (error.code === 'EADDRINUSE') throw new Error('The local connection port is busy. Close other MSAS instances and try again.');
+      throw error;
+    }
+  });
+  ipcMain.handle('tab:answer', (event, message) => {
+    guard(event);
+    if (!tabBridge || message?.session !== tabSession) throw new Error('Tab connection expired.');
+    tabBridge.send(message);
+  });
   ipcMain.handle('capture:ready', (event, audio) => {
     guard(event);
     if (state.mode !== 'starting') return;
@@ -165,7 +205,7 @@ app.whenReady().then(() => {
 
   mainWindow = secureWindow({ title: 'MSAS · Conversation companion', width: 1240, height: 880,
     minWidth: 960, minHeight: 720, backgroundColor: '#f7f8f5', show: false });
-  mainWindow.loadFile(path.join(__dirname, '../src/index.html'));
+  mainWindow.loadURL('msas://app/index.html');
   mainWindow.once('ready-to-show', () => mainWindow.show());
   mainWindow.on('closed', () => { stopSession(); app.quit(); });
   mainWindow.webContents.on('render-process-gone', stopSession);

@@ -28,6 +28,17 @@ h2 { font-size: 17px; font-weight: 600; margin: 0; }
 #preview-empty { padding: 20px; }
 #preview-empty p { font-size: 14px; color: var(--muted); margin: 0 0 18px; }
 video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #17221b; }
+#face-selection { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; touch-action: none; }
+#face-selection[data-selecting="true"] { pointer-events: auto; cursor: crosshair; }
+#face-selection:focus-visible { outline: 3px solid #81a991; outline-offset: -4px; }
+#face-controls { border-top: 1px solid #edf0eb; padding: 14px 0 16px; }
+.expression-row { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; font-size: 13px; }
+.expression-row > span { color: var(--muted); }
+#expression-result { font-weight: 500; }
+#expression-result[data-state="error"] { color: #984c3b; }
+.face-note { font-size: 11px; line-height: 1.6; color: var(--muted); margin: 8px 0; }
+.face-actions { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-top: 12px; }
+.face-actions label { font-size: 11px; color: var(--muted); display: inline-flex; align-items: center; gap: 5px; }
 .button { border: 1px solid transparent; border-radius: 6px; padding: 11px 16px; font-size: 13px; font-weight: 500; }
 .primary { background: var(--green); color: #fff; }
 .primary:hover:not(:disabled) { background: #194b37; }
@@ -35,6 +46,9 @@ video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: con
 .secondary:hover:not(:disabled) { background: #f2f6ef; }
 .stop { background: #fff5f2; color: #984c3b; border-color: #e9d8d0; }
 .source-summary { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 12px 0 18px; min-height: 28px; }
+#tab-pairing { padding: 16px; margin-top: 14px; background: #f0f5ed; border-radius: 8px; font-size: 12px; line-height: 1.6; }
+#pairing-code { width: 100%; margin-top: 8px; padding: 8px; border: 1px solid #d6dfd3; border-radius: 4px; font-family: monospace; }
+#tab-pairing summary { cursor: pointer; }
 #source-name { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .text-button { flex-shrink: 0; border: 0; background: transparent; color: var(--green); padding: 6px 0; font-size: 12px; }
 .audio-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding-top: 18px; border-top: 1px solid #edf0eb; }

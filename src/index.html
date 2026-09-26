@@ -3,9 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; media-src 'self' blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; frame-src 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; frame-src 'none'">
   <title>MSAS · Conversation companion</title>
   <link rel="stylesheet" href="styles.css">
+  <script src="face-state.js" defer></script>
+  <script src="face-analysis.js" defer></script>
+  <script src="tab-capture.js" defer></script>
   <script src="app.js" defer></script>
 </head>
 <body>
@@ -17,11 +20,24 @@
         <div class="panel-heading"><h2 id="source-heading">Call source</h2></div>
         <div class="preview" id="preview">
           <video id="video" autoplay muted playsinline aria-label="Live preview of the selected call window" hidden></video>
-          <div id="preview-empty"><p>Select the window with your call.</p><button id="choose-source" class="button secondary">Choose window or screen</button></div>
+          <canvas id="face-selection" tabindex="0" aria-label="Participant selection. Arrow keys move the box, Shift and arrows resize, Enter confirms, Escape cancels." hidden></canvas>
+          <div id="preview-empty"><p>Keep your call live here, even with the browser minimized.</p><button id="connect-tab" class="button primary">Connect browser tab</button><p class="face-note">Requires the MSAS Edge extension.</p><button id="choose-source" class="text-button">Or choose a visible window or screen</button></div>
+        </div>
+        <div id="tab-pairing" hidden>
+          <label for="pairing-code">Paste this code into the MSAS extension on your call tab</label>
+          <input id="pairing-code" readonly spellcheck="false" aria-label="Temporary pairing code">
+          <p class="face-note">Expires in two minutes. In Edge: Extensions → MSAS Call Connection → Connect this tab. Once video appears here, you can minimize Edge.</p>
+          <details><summary>First-time extension setup</summary><p>Open edge://extensions, enable Developer mode, click Load unpacked, and select the <strong>extension</strong> folder inside your MSAS project. Pin MSAS Call Connection to the toolbar.</p></details>
         </div>
         <div class="source-summary"><span id="source-name">No source selected</span><button class="text-button" id="change-source" disabled>Change</button></div>
+        <div id="face-controls" hidden>
+          <div class="expression-row"><span>Expression</span><strong id="expression-result" role="status">Select a participant to analyze</strong></div>
+          <p class="face-note">Estimated facial expression; feelings can differ. Processed on this laptop.</p>
+          <div class="face-actions"><button id="select-participant" class="button secondary">Select participant</button><button id="stop-analysis" class="text-button" disabled>Pause analysis</button><label><input id="show-landmarks" type="checkbox"> Show landmarks</label></div>
+          <p id="face-help" class="face-note">In Meet, pin the other person. Select their video area here.</p>
+        </div>
         <div class="audio-row">
-          <div><label for="system-audio">System audio</label><p id="audio-description">Includes other apps’ sound. Microphone stays off.</p></div>
+          <div><label for="system-audio">Include call audio</label><p id="audio-description">Tab connection: just this tab. Window capture: all system sound. Microphone stays off.</p></div>
           <input id="system-audio" type="checkbox" class="switch" aria-describedby="audio-description">
         </div>
         <div id="audio-status" class="audio-status" hidden><span id="audio-label">Waiting for audio</span><meter id="audio-meter" min="0" max="1" value="0" aria-label="System audio level"></meter></div>
@@ -42,7 +58,7 @@
           <input id="speaker-context" placeholder="Language, region, or other context" maxlength="160">
         </fieldset>
         <p class="context-note">Only what you choose to share. Never inferred from a face or accent.</p>
-        <p class="prototype-note">AI isn’t connected yet. These settings are saved only for this session.</p>
+        <p class="prototype-note">Facial expressions run locally. Speech and social-cue analysis come later; context settings aren’t used yet.</p>
       </section>
     </div>
     <footer>No recordings or uploads. Stop clears the preview and session settings.</footer>

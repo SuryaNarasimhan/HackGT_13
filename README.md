@@ -1,6 +1,30 @@
 # MSAS desktop companion
 
-A Windows laptop application that sits alongside a call with a quiet screen border and floating explanation controls. Google Meet is the first manual trial; capture uses operating-system sources, not Meet selectors, extensions, or APIs. macOS and Linux are outside the supported scope.
+A Windows laptop application that sits alongside a call with a quiet screen border and floating explanation controls. Google Meet is the first trial. An optional Edge extension captures browser tabs; OS window/screen capture remains available for other applications. macOS and Linux are outside the supported scope.
+
+## Keep video live with Edge minimized
+
+Use **Connect browser tab**. This captures the tab directly and streams it locally to MSAS. The older **Choose window or screen** mode depends on the source window being rendered and does not support the minimized-browser requirement.
+
+One-time setup:
+
+1. Open `edge://extensions` in Edge (Chromium 116 or newer).
+2. Enable **Developer mode**, click **Load unpacked**, and select `C:\Users\Lakshmi\Desktop\MSAS\extension` (the `extension` folder in this project).
+3. Pin **MSAS Call Connection** from Edge's Extensions menu. If already installed, click **Reload** on its extension card after code updates.
+
+For each call:
+
+1. Fully restart MSAS. Open your call tab in Edge.
+2. Optionally enable **Include call audio** in MSAS, then click **Connect browser tab**. Copy its complete pairing code. An unused code expires after two minutes.
+3. Switch to the call tab, open **MSAS Call Connection**, paste the code, and click **Connect this tab**.
+4. Wait for the live preview, then minimize Edge. Keep Edge and the call tab open. Pin the desired participant and select their video area in MSAS for expression analysis.
+5. Stop from MSAS or the extension. A new connection requires a new code. Capture follows the selected tab across navigation until sharing stops.
+
+The extension runs capture in an offscreen document, so closing its popup does not stop the stream. Optional audio comes from the tab only; its sound is restored in the extension and the MSAS preview stays muted to avoid doubling sound. Physical microphone/camera access is not requested. No cloud service, API key, or new npm dependency is needed.
+
+The signaling listener binds only to `127.0.0.1:47831`, requires a random per-session token, and exists only during pairing/capture. It validates Host, supplied Origin, client ID, and bounded messages. Signaling carries connection descriptions; media travels over a same-machine WebRTC peer connection with no STUN/TURN servers. No media recording or persistent pairing storage is created. Stop clears the preview, facial analysis, peer, pairing code and listener. The extension releases its tracks when the connection ends. If the port is busy, close other MSAS instances.
+
+Verification: all 12 unit checks and syntax checks passed. An actual unpacked Edge extension was exercised through its popup with a changing synthetic tab. WebRTC delivered its video to the app renderer, pixels continued changing after setting the source window to minimized in a headless browser test, and app Stop ended extension sharing. Electron IPC was simulated in this test; a native Electron plus live Meet session is still a manual Windows acceptance check. Other call platforms are not yet validated.
 
 ## Run locally
 
@@ -32,10 +56,10 @@ Native desktop verification remains incomplete: Electron's GPU/renderer subproce
 - Window/screen selection, local video preview, and opt-in system-output audio capture.
 - Audio level meter that distinguishes a present track from a sustained lack of signal. Captured audio is never played back, avoiding feedback.
 - A click-through border and a separate interactive panel above other windows. The controls can expand explanations, return to setup, and stop the session.
-- Four manually stepped, clearly labeled simulated examples: sarcasm, idiom, slang, and an ambiguous statement where interpretation is withheld.
+- Local facial landmarks and tentative expression estimates for a selected participant.
 - Stop/close cleanup: media tracks stop, audio analysis closes, overlays disappear, and context fields clear. Demo mode never captures a call.
 
-**Not implemented:** transcription, vocal-tone inference, facial analysis, live AI interpretations, translated output, packaged installers, code signing, or automatic tracking of a participant/window across monitors. Context fields are session-only UI inputs reserved for the later inference pipeline; they do not change the scripted demo.
+**Not implemented:** transcription, vocal-tone inference, sarcasm or other social-cue interpretations, translated output, packaged installers, code signing, or automatic tracking of a participant/window across monitors. Context fields are session-only UI inputs reserved for the later inference pipeline; they do not change the scripted demo.
 
 ## Google Meet trial on Windows
 
@@ -46,7 +70,7 @@ Native desktop verification remains incomplete: Electron's GPU/renderer subproce
 5. Click **Return to call**. The border and floating controls remain. The border is click-through; the small panel is intentionally interactive.
 6. Expand the panel to inspect capture status. Live mode never produces simulated cues.
 7. Stop from the floating panel. Verify the overlays disappear and the setup preview and context clear.
-8. Separately, use **Try a simulated cue** to inspect the intended explanation interaction. **Next example** cycles the four examples. No microphone or screen is captured in this mode.
+8. Return to setup and follow the local expression analysis trial below.
 
 ## Capture and display limitations
 
@@ -78,4 +102,18 @@ Source enumeration generates transient thumbnails before capture begins, after t
 
 ## Before claiming a working AI demo
 
-Connect the actual transcription and interpretation pipeline, preserve abstention, validate provider privacy settings if remote inference is used, and measure cue latency and accuracy. The current scripted walkthrough demonstrates the interface only.
+Connect the actual transcription and interpretation pipeline, preserve abstention, validate provider privacy settings if remote inference is used, and measure cue latency and accuracy. Local expression inference works; interpretation of speech and intended meaning is still pending.
+
+## Local expression analysis
+
+Human 3.3.6 is pinned and installed with the app. No API key or paid service is needed. After starting capture, pin the other participant in Meet and click **Select participant**. Drag around their video in the preview, or use arrows to move the selection, Shift+arrows to resize, and Enter to confirm. Optional landmarks show face geometry. **Stop analysis** pauses inference without stopping capture.
+
+Only the selected crop is processed in a worker, at most 480 pixels on its longest edge, one request at a time with 250 ms between completions. WebGL is preferred with CPU fallback. Three consistent observations are required before a tentative expression label appears. Missing, weak, multiple-face, or stale observations clear the estimate. Scores are not calibrated probabilities. Expressions do not establish someone's feelings or intentions; lighting, pose, occlusion and individual differences can cause mistakes. This is not identity tracking: keep the same participant pinned and reselect if tiles rearrange.
+
+All models are bundled through the dependency. Frames and results stay in memory; stopping terminates the worker. A local asset allowlist and CSP restrict loading, remote HTTP/WebSocket requests are blocked, and persistent model caching is disabled. Identity and demographic models are disabled. Context settings do not influence this classifier. Expression results appear below the preview; the floating border still shows capture status.
+
+Validation: eight automated tests passed for stabilization, abstention, letterbox coordinates, restricted assets and installed model shards. An actual Edge worker test loaded all three models, detected a face with 468 landmarks, then returned no faces on blank input. This is an integration check, not a population accuracy measurement. Native Google Meet capture plus inference still needs a manual Windows trial. Run `npm run check` and `npm test`.
+
+Manual trial: select a pinned participant, enable landmarks, test a clear face then an empty tile, try two faces in the region, pause and reselect, and stop capture during model loading. Estimates must clear when analysis stops. The simplified UI has Call source and Context; older simulated-demo instructions above describe retained prototype code, not a visible demo button.
+
+Attribution: [Human](https://github.com/vladmandic/human) is MIT licensed. Its [model inventory](https://github.com/vladmandic/human/wiki/Models) identifies the detector/mesh as MediaPipe-derived ([Apache 2.0](https://github.com/google-ai-edge/mediapipe/blob/master/LICENSE)) and expression model as derived from [face_classification](https://github.com/oarriaga/face_classification) ([MIT](https://github.com/oarriaga/face_classification/blob/master/LICENSE)). Preserve applicable notices when distributing an installer.
