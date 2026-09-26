@@ -37,6 +37,23 @@ class TestOverlayWindow(unittest.TestCase):
 
         print("\nOverlay Window successfully instantiated and verified!")
 
+    def test_overlay_transcript_display(self):
+        """Verifies transcription text is updated and visible on the overlay."""
+        window = SocialLensOverlayWindow(width=340, height=480)
+        self.assertTrue(hasattr(window, "transcript_label"))
+        self.assertTrue(hasattr(window, "set_transcript"))
+
+        test_phrase = "I really appreciate you helping with this."
+        window.set_transcript(test_phrase)
+
+        if hasattr(window.transcript_label, "text"):
+            self.assertIn(test_phrase, window.transcript_label.text())
+        elif hasattr(window.transcript_label, "cget"):
+            self.assertIn(test_phrase, window.transcript_label.cget("text"))
+
+        if hasattr(window, "close"):
+            window.close()
+
 
 if __name__ == "__main__":
     unittest.main()

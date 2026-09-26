@@ -10,7 +10,13 @@ from typing import Optional
 
 from app.config import UI_WINDOW_WIDTH, UI_WINDOW_HEIGHT
 from app.ui.qt_compat import QT_AVAILABLE, QtCore, QtWidgets, QtGui
-from app.ui.styles import OVERLAY_STYLESHEET
+from app.ui.styles import (
+    OVERLAY_STYLESHEET,
+    COLOR_BG_CARD,
+    COLOR_TEXT_PRIMARY,
+    COLOR_TEXT_SECONDARY,
+    COLOR_TEXT_MUTED,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +106,47 @@ if QT_AVAILABLE:
             self.telemetry = TelemetryWidget(self.central_container)
             self.main_layout.addWidget(self.telemetry)
 
+            # 3. Live Spoken Transcript Card (Always displays the latest transcribed speech for every update)
+            self.transcript_box = QtWidgets.QFrame(self.central_container)
+            self.transcript_box.setObjectName("TranscriptBox")
+            self.transcript_box.setStyleSheet(
+                f"""
+                QFrame#TranscriptBox {{
+                    background-color: {COLOR_BG_CARD};
+                    border: 1px solid rgba(255, 255, 255, 0.08);
+                    border-radius: 10px;
+                }}
+                """
+            )
+            transcript_layout = QtWidgets.QVBoxLayout(self.transcript_box)
+            transcript_layout.setContentsMargins(10, 7, 10, 7)
+            transcript_layout.setSpacing(3)
+
+            header_row = QtWidgets.QHBoxLayout()
+            header_row.setContentsMargins(0, 0, 0, 0)
+            self.transcript_tag = QtWidgets.QLabel("💬 SPOKEN WORDS", self.transcript_box)
+            self.transcript_tag.setStyleSheet(
+                f"color: {COLOR_TEXT_MUTED}; font-size: 9.5px; font-weight: 700; letter-spacing: 0.5px;"
+            )
+            header_row.addWidget(self.transcript_tag)
+            header_row.addStretch()
+
+            self.transcript_label = QtWidgets.QLabel("Listening for speech...", self.transcript_box)
+            self.transcript_label.setWordWrap(True)
+            self.transcript_label.setStyleSheet(
+                f"""
+                color: {COLOR_TEXT_SECONDARY};
+                font-size: 11px;
+                font-style: italic;
+                font-family: 'Segoe UI', Inter, sans-serif;
+                line-height: 1.35;
+                """
+            )
+
+            transcript_layout.addLayout(header_row)
+            transcript_layout.addWidget(self.transcript_label)
+            self.main_layout.addWidget(self.transcript_box)
+
             self.cue_card = SubtextInsightCard(self.central_container)
             self.main_layout.addWidget(self.cue_card)
 
@@ -171,11 +218,14 @@ if QT_AVAILABLE:
 
         def _trigger_test_cue(self):
             """Manual trigger for demo and testing preview."""
+            sample_text = "Yeah, that's just fantastic."
+            self.set_transcript(sample_text)
             sample_cue = {
                 "social_cue_type": "Dry Sarcasm / Irony",
                 "confidence": "High",
                 "explanation": "Spoken words express enthusiasm ('Great job'), but vocal tone was monotone and facial expression was deadpan.",
-                "suggested_action": "Acknowledge the shared irony lightly rather than taking the literal praise at face value."
+                "suggested_action": "Acknowledge the shared irony lightly rather than taking the literal praise at face value.",
+                "transcript": sample_text
             }
             self.cue_card.display_cue(sample_cue)
 
@@ -286,6 +336,24 @@ if QT_AVAILABLE:
         def set_speech_active(self, is_speaking: bool):
             """Slot for speech state toggles."""
             self.set_status("Speaking" if is_speaking else "Listening")
+
+        def set_transcript(self, text: str):
+            """Updates the visible transcription text on the overlay for each update."""
+            clean = text.strip()
+            if not clean:
+                return
+            display_text = clean if (clean.startswith('"') or clean.startswith('[')) else f'"{clean}"'
+            self.transcript_label.setText(display_text)
+            self.transcript_label.setStyleSheet(
+                f"""
+                color: {COLOR_TEXT_PRIMARY};
+                font-size: 11px;
+                font-style: normal;
+                font-weight: 500;
+                font-family: 'Segoe UI', Inter, sans-serif;
+                line-height: 1.35;
+                """
+            )
 
         def toggle_collapse(self):
             """Toggles between full HUD card and minimized pill bar."""
@@ -399,6 +467,28 @@ else:
             )
             close_btn.pack(side=tk.RIGHT)
 
+            # Live Spoken Transcript Box
+            self.transcript_box = tk.Frame(self.container, bg="#1E293B", padx=6, pady=4)
+            self.transcript_box.pack(fill=tk.X, padx=6, pady=4)
+            self.transcript_tag = tk.Label(
+                self.transcript_box,
+                text="💬 SPOKEN WORDS",
+                fg="#94A3B8",
+                bg="#1E293B",
+                font=("Segoe UI", 7, "bold")
+            )
+            self.transcript_tag.pack(anchor="w")
+            self.transcript_label = tk.Label(
+                self.transcript_box,
+                text="Listening for speech...",
+                fg="#FFFFFF",
+                bg="#1E293B",
+                font=("Segoe UI", 8, "italic"),
+                wraplength=280,
+                justify="left"
+            )
+            self.transcript_label.pack(anchor="w")
+
             # Drag Bindings
             self.header.bind("<Button-1>", self._start_drag)
             self.header.bind("<B1-Motion>", self._do_drag)
@@ -415,6 +505,14 @@ else:
             x = self.root.winfo_x() + (event.x - self._drag_x)
             y = self.root.winfo_y() + (event.y - self._drag_y)
             self.root.geometry(f"+{x}+{y}")
+
+        def set_transcript(self, text: str):
+            clean = text.strip()
+            if not clean:
+                return
+            display_text = clean if (clean.startswith('"') or clean.startswith('[')) else f'"{clean}"'
+            if hasattr(self, "transcript_label"):
+                self.transcript_label.config(text=display_text, font=("Segoe UI", 8, "normal"))
 
         def set_status(self, status: str):
             if getattr(self, "demo_runner", None) is not None:

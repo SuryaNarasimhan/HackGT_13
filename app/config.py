@@ -22,9 +22,12 @@ AUDIO_BUFFER_SECONDS = 8.0         # Circular buffer length (seconds)
 AUDIO_CHUNK_SIZE = 512             # VAD processing chunk size (samples)
 
 # VAD (Voice Activity Detection) Parameters
-VAD_SILENCE_THRESHOLD_MS = 500     # Silence duration to mark end of utterance
-VAD_MIN_SPEECH_DURATION_MS = 600   # Minimum speech duration to trigger pipeline
-VAD_CONFIDENCE_THRESHOLD = 0.5     # Silero VAD positive detection threshold
+VAD_SILENCE_THRESHOLD_MS = int(os.getenv("VAD_SILENCE_THRESHOLD_MS", "450"))       # Silence duration before checking speech pause
+VAD_MIN_SPEECH_DURATION_MS = int(os.getenv("VAD_MIN_SPEECH_DURATION_MS", "350"))   # Minimum speech duration to trigger pipeline
+VAD_MAX_SPEECH_DURATION_SECONDS = float(os.getenv("VAD_MAX_SPEECH_DURATION_SECONDS", "4.5")) # Max continuous speech chunk before emitting
+VAD_CONFIDENCE_THRESHOLD = float(os.getenv("VAD_CONFIDENCE_THRESHOLD", "0.35"))     # Silero VAD positive detection threshold
+VAD_PRE_SPEECH_PADDING_MS = int(os.getenv("VAD_PRE_SPEECH_PADDING_MS", "250"))     # Ring buffer padding to preserve onset consonants
+VAD_CONTINUATION_WINDOW_MS = int(os.getenv("VAD_CONTINUATION_WINDOW_MS", "400"))   # Grace window to assemble multi-clause sentences into single turn
 
 # Screen Capture Settings
 SCREEN_FPS = 30

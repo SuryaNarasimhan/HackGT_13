@@ -14,12 +14,7 @@ from scipy import signal
 
 # Suppress harmless WASAPI buffer discontinuity warnings
 warnings.filterwarnings("ignore", message=".*data discontinuity in recording.*")
-try:
-    import soundcard as sc
-    if hasattr(sc, "SoundcardRuntimeWarning"):
-        warnings.filterwarnings("ignore", category=sc.SoundcardRuntimeWarning)
-except (ImportError, AttributeError):
-    pass
+warnings.filterwarnings("ignore", message=".*discontinuity.*")
 
 from app.config import (
     AUDIO_SAMPLE_RATE,
@@ -62,10 +57,10 @@ class UserMicrophoneCapture:
         logger.info("User microphone capture thread started.")
 
     def stop(self):
-        """Gracefully halts microphone capture."""
+        """Gracefully halts microphone capture without blocking."""
         self._running = False
-        if self._thread is not None:
-            self._thread.join(timeout=1.5)
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=0.1)
             self._thread = None
         logger.info("User microphone capture stopped.")
 
@@ -76,6 +71,8 @@ class UserMicrophoneCapture:
 
         try:
             import soundcard as sc
+            warnings.filterwarnings("ignore", category=sc.SoundcardRuntimeWarning)
+            warnings.filterwarnings("ignore", message=".*discontinuity.*")
             mic = sc.default_microphone()
             soundcard_loaded = True
             logger.info(f"Connected to local microphone: {mic.name}")
@@ -84,24 +81,36 @@ class UserMicrophoneCapture:
             soundcard_loaded = False
 
         if soundcard_loaded and mic is not None:
-            try:
-                native_rate = 48000
-                with mic.recorder(samplerate=native_rate, channels=1) as recorder:
-                    chunk_native = int(native_rate * (self.chunk_size / self.target_rate))
-                    while self._running:
-                        data = recorder.record(numframes=chunk_native)
-                        if len(data) > 0:
+            native_rate = 48000
+            chunk_native = int(native_rate * (self.chunk_size / self.target_rate))
+            while self._running:
+                try:
+                    with mic.recorder(samplerate=native_rate, channels=1) as recorder:
+                        while self._running:
+                            try:
+                                data = recorder.record(numframes=chunk_native)
+                            except Exception as read_err:
+                                if not self._running:
+                                    break
+                                time.sleep(0.04)
+                                continue
+
+                            if not self._running or data is None or len(data) == 0:
+                                continue
+
                             # Downsample to 16kHz mono
                             resampled = signal.resample_poly(data[:, 0], self.target_rate, native_rate)
                             chunk_16k = resampled.astype(np.float32)
                             self._dispatch_chunk(chunk_16k)
-            except Exception as e:
-                logger.warning(f"Microphone recording stream error: {e}. Reverting to idle mode.")
+                except Exception as e:
+                    if not self._running:
+                        break
+                    logger.debug(f"Microphone session reset: {e}. Reconnecting...")
+                    time.sleep(0.3)
 
         # Idle fallback loop if microphone hardware is unavailable
         while self._running:
             time.sleep(self.chunk_size / self.target_rate)
-            # Ambient silence
             silent_chunk = np.zeros(self.chunk_size, dtype=np.float32)
             self._dispatch_chunk(silent_chunk)
 

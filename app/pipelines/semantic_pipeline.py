@@ -123,7 +123,12 @@ class SemanticPipeline:
             )
             self._emotion_classifier = None
 
-    def transcribe(self, audio_data: np.ndarray, sample_rate: int = 16000) -> Tuple[str, float]:
+    def transcribe(
+        self,
+        audio_data: np.ndarray,
+        sample_rate: int = 16000,
+        initial_prompt: Optional[str] = None
+    ) -> Tuple[str, float]:
         """
         Transcribes a 1D float32 audio buffer.
         Returns: (transcript_text, average_confidence)
@@ -142,11 +147,17 @@ class SemanticPipeline:
             if np.max(np.abs(audio_f32)) > 1.0:
                 audio_f32 = audio_f32 / 32768.0
 
+            transcribe_kwargs = {
+                "beam_size": 1,
+                "language": "en",
+                "vad_filter": False,
+            }
+            if initial_prompt and initial_prompt.strip():
+                transcribe_kwargs["initial_prompt"] = initial_prompt.strip()
+
             segments, info = self._stt_model.transcribe(
                 audio_f32,
-                beam_size=1,
-                language="en",
-                vad_filter=False
+                **transcribe_kwargs
             )
 
             texts = []
@@ -205,11 +216,16 @@ class SemanticPipeline:
 
         return dict_to_vector(counts)
 
-    def process(self, audio_data: np.ndarray, sample_rate: int = 16000) -> Tuple[str, np.ndarray, float]:
+    def process(
+        self,
+        audio_data: np.ndarray,
+        sample_rate: int = 16000,
+        context_prompt: Optional[str] = None
+    ) -> Tuple[str, np.ndarray, float]:
         """
         End-to-end execution: Transcribes audio buffer and computes 7-D emotion distribution.
         Returns: (transcript, p_semantic_vector, confidence)
         """
-        transcript, conf = self.transcribe(audio_data, sample_rate)
+        transcript, conf = self.transcribe(audio_data, sample_rate, initial_prompt=context_prompt)
         p_semantic = self.classify_text_emotion(transcript)
         return transcript, p_semantic, conf

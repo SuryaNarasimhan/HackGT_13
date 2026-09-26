@@ -15,6 +15,7 @@ import warnings
 
 # Suppress harmless WASAPI loopback silence/buffer discontinuity warnings
 warnings.filterwarnings("ignore", message=".*data discontinuity in recording.*")
+warnings.filterwarnings("ignore", message=".*discontinuity.*")
 
 from app.capture.audio_loopback import AudioLoopbackCapture
 from app.capture.screen_capture import ScreenCaptureManager
@@ -83,6 +84,8 @@ def main():
             bridge.status_signal.connect(window.set_status)
         if hasattr(window, "set_speech_active"):
             bridge.speech_state_signal.connect(window.set_speech_active)
+        if hasattr(window, "set_transcript"):
+            bridge.transcript_signal.connect(window.set_transcript)
 
         coordinator = PipelineCoordinator(
             audio_capture=audio_capture,
@@ -92,6 +95,7 @@ def main():
             cue_callback=bridge.emit_cue,
             speech_state_callback=bridge.emit_speech_state,
             status_callback=bridge.emit_status,
+            transcript_callback=bridge.emit_transcript,
             jsd_threshold=args.threshold
         )
     else:
@@ -112,6 +116,10 @@ def main():
             if hasattr(window, "set_status"):
                 window.set_status(status)
 
+        def on_transcript(text):
+            if hasattr(window, "set_transcript"):
+                window.set_transcript(text)
+
         coordinator = PipelineCoordinator(
             audio_capture=audio_capture,
             screen_capture=screen_capture,
@@ -120,6 +128,7 @@ def main():
             cue_callback=on_cue,
             speech_state_callback=on_speech_state,
             status_callback=on_status,
+            transcript_callback=on_transcript,
             jsd_threshold=args.threshold
         )
 
@@ -131,38 +140,68 @@ def main():
                 telemetry_callback=bridge.emit_telemetry,
                 cue_callback=bridge.emit_cue,
                 reasoner=coordinator.reasoner,
-                threshold=args.threshold
+                threshold=args.threshold,
+                transcript_callback=bridge.emit_transcript
             )
         else:
             demo_runner = MockDemoRunner(
                 telemetry_callback=on_telemetry,
                 cue_callback=on_cue,
                 reasoner=coordinator.reasoner,
-                threshold=args.threshold
+                threshold=args.threshold,
+                transcript_callback=on_transcript
             )
         if hasattr(window, "enable_demo_mode"):
             window.enable_demo_mode(demo_runner)
         logger.info("Demo Mode ACTIVE. Hotkeys: [1] Sarcasm, [2] Sincere Praise, [3] Frustration")
 
     # 5. Clean Shutdown Handler
+    _shutting_down = False
+
     def shutdown_app(*_):
-        logger.info("Shutting down SocialLens gracefully...")
+        nonlocal _shutting_down
+        if _shutting_down:
+            return
+        _shutting_down = True
+        logger.info("Shutting down SocialLens...")
+
+        # Hide window immediately so user gets instant UI feedback
+        if hasattr(window, "hide"):
+            try:
+                window.hide()
+            except Exception:
+                pass
+
+        # Disconnect window close signal to avoid recursive re-entrancy
+        if hasattr(window, "window_closed"):
+            try:
+                window.window_closed.disconnect()
+            except Exception:
+                pass
+
         try:
             coordinator.stop()
         except Exception:
             pass
-        if hasattr(window, "close"):
-            try:
-                window.close()
-            except Exception:
-                pass
-        if app is not None:
-            try:
-                app.quit()
-            except Exception:
-                pass
+
         import os
         os._exit(0)
+
+    # Native Windows Console Ctrl Handler for instantaneous, clean Ctrl+C termination
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            def _win_ctrl_handler(dwCtrlType):
+                shutdown_app()
+                return True
+
+            _HandlerRoutine = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
+            _ctrl_handler = _HandlerRoutine(_win_ctrl_handler)
+            ctypes.windll.kernel32.SetConsoleCtrlHandler(_ctrl_handler, True)
+        except Exception as e:
+            logger.debug(f"Console ctrl handler setup note: {e}")
 
     # Hook window close signal
     if hasattr(window, "window_closed"):
@@ -176,7 +215,7 @@ def main():
     if QT_AVAILABLE and QtCore is not None:
         interrupt_timer = QtCore.QTimer()
         interrupt_timer.timeout.connect(lambda: None)
-        interrupt_timer.start(200)
+        interrupt_timer.start(100)
 
     # 6. Start Perception Coordinator (live mode only; demo mode uses deterministic triggers)
     if not args.demo:

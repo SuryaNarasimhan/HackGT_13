@@ -58,12 +58,14 @@ class MockDemoRunner:
         telemetry_callback: Callable[[np.ndarray, np.ndarray, np.ndarray, float], None],
         cue_callback: Callable[[Dict[str, str]], None],
         reasoner: Optional[GeminiReasoner] = None,
-        threshold: float = JSD_THRESHOLD
+        threshold: float = JSD_THRESHOLD,
+        transcript_callback: Optional[Callable[[str], None]] = None,
     ):
         self.telemetry_cb = telemetry_callback
         self.cue_cb = cue_callback
         self.reasoner = reasoner or GeminiReasoner()
         self.threshold = threshold
+        self.transcript_cb = transcript_callback
 
     def trigger_scenario(self, scenario_id: int) -> Dict:
         """
@@ -94,8 +96,10 @@ class MockDemoRunner:
         jsd_score = float(conflict_data["tri_modal_jsd"])
         is_trigger = bool(conflict_data["is_trigger"])
 
-        # 2. Update HUD Telemetry
+        # 2. Update HUD Telemetry & Spoken Transcript
         self.telemetry_cb(p_v, p_a, p_s, jsd_score)
+        if self.transcript_cb is not None:
+            self.transcript_cb(transcript)
 
         # 3. Reasoner Synthesis on every scenario execution with conversational history
         try:

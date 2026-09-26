@@ -21,6 +21,7 @@ class TestCoordinator(unittest.TestCase):
 
         self.telemetry_history = []
         self.cue_history = []
+        self.transcript_history = []
 
         def on_telemetry(p_v, p_a, p_s, jsd):
             self.telemetry_history.append((p_v, p_a, p_s, jsd))
@@ -28,12 +29,16 @@ class TestCoordinator(unittest.TestCase):
         def on_cue(cue_data):
             self.cue_history.append(cue_data)
 
+        def on_transcript(text):
+            self.transcript_history.append(text)
+
         self.coordinator = PipelineCoordinator(
             audio_capture=self.audio,
             screen_capture=self.screen,
             vad_detector=self.vad,
             telemetry_callback=on_telemetry,
             cue_callback=on_cue,
+            transcript_callback=on_transcript,
             jsd_threshold=0.40
         )
 
@@ -62,6 +67,8 @@ class TestCoordinator(unittest.TestCase):
         self.assertGreaterEqual(result["jsd_score"], 0.0)
         self.assertLessEqual(result["jsd_score"], 1.0)
         self.assertGreater(len(self.telemetry_history), 0)
+        self.assertGreater(len(self.transcript_history), 0)
+        self.assertEqual(self.transcript_history[-1], result["transcript"])
 
         print("\n--- COORDINATOR UTTERANCE PROCESSED ---")
         print(f"Transcript: {result['transcript']}")

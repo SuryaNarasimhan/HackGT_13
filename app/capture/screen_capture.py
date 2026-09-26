@@ -230,10 +230,10 @@ class ScreenCaptureManager:
         logger.info("Screen capture thread started.")
 
     def stop(self):
-        """Stops background screen capture thread."""
+        """Stops background screen capture thread without blocking."""
         self._running = False
-        if self._thread is not None:
-            self._thread.join(timeout=1.0)
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=0.1)
             self._thread = None
         logger.info("Screen capture thread stopped.")
 
@@ -258,6 +258,7 @@ class ScreenCaptureManager:
             mss_instance = None
 
         frame_interval = 1.0 / self.fps
+        last_grab_error_time = 0.0
 
         while self._running:
             start_t = time.time()
@@ -279,7 +280,10 @@ class ScreenCaptureManager:
                     frame_rgb = np.array(sct_img, dtype=np.uint8)[:, :, :3][:, :, ::-1]
                     self.push_frame(frame_rgb, start_t)
                 except Exception as e:
-                    logger.warning(f"Error during mss grab: {e}")
+                    now = time.time()
+                    if now - last_grab_error_time >= 5.0:
+                        logger.warning(f"Error during mss grab: {e}")
+                        last_grab_error_time = now
                     self._push_fallback_frame(start_t)
             else:
                 self._push_fallback_frame(start_t)

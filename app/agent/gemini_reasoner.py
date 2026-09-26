@@ -4,6 +4,7 @@ Interprets cross-modal incongruence into empathetic, clear social cues.
 Includes robust fallback/mock reasoning when offline or without an API key.
 """
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 import logging
 from typing import Any, Dict, List, Optional
@@ -64,6 +65,7 @@ class GeminiReasoner:
         self.api_key = api_key or GEMINI_API_KEY
         self.model_name = model_name
         self.client = None
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="GeminiCallWorker")
         self._init_client()
 
     def _init_client(self):
@@ -100,14 +102,15 @@ class GeminiReasoner:
         """
         Synthesizes multimodal cue information.
         Attempts live Gemini 2.5 Flash structured generation first,
-        falling back seamlessly to rule-based heuristics if offline.
+        falling back seamlessly to rule-based heuristics if offline or timed out (>4s).
         """
         if is_trigger is None:
             is_trigger = bool(jsd_score >= 0.40 or max_conflict_value >= 0.65)
 
         if self.client:
             try:
-                return self._call_gemini(
+                future = self._executor.submit(
+                    self._call_gemini,
                     transcript=transcript,
                     p_video=p_video,
                     p_audio=p_audio,
@@ -118,8 +121,9 @@ class GeminiReasoner:
                     is_trigger=is_trigger,
                     dialogue_history=dialogue_history
                 )
+                return future.result(timeout=4.0)
             except Exception as e:
-                logger.warning(f"Gemini API call failed ({e}). Reverting to fallback reasoner.")
+                logger.warning(f"Gemini API call timed out or failed ({e}). Reverting to fallback reasoner.")
 
         # Fallback heuristic reasoner
         return self._fallback_heuristic_reasoner(

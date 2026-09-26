@@ -16,12 +16,12 @@ from app.capture.audio_loopback import AudioLoopbackCapture
 from app.capture.mic_capture import UserMicrophoneCapture
 from app.capture.screen_capture import ScreenCaptureManager
 from app.capture.vad_detector import VADDetector
-from app.config import JSD_THRESHOLD
+from app.config import JSD_THRESHOLD, VAD_CONTINUATION_WINDOW_MS
 from app.conversation_memory import ConversationMemory
 from app.math_engine.jsd import analyze_cross_modal_conflict
 from app.pipelines.audio_pipeline import AudioPipeline
 from app.pipelines.semantic_pipeline import SemanticPipeline
-from app.pipelines.taxonomy import get_top_emotion
+from app.pipelines.taxonomy import get_top_emotion, normalize_distribution
 from app.pipelines.video_pipeline import VideoPipeline
 from app.ui.qt_compat import QT_AVAILABLE, QtCore
 
@@ -45,6 +45,7 @@ class PipelineCoordinator:
         cue_callback: Optional[Callable[[Dict[str, str]], None]] = None,
         speech_state_callback: Optional[Callable[[bool], None]] = None,
         status_callback: Optional[Callable[[str], None]] = None,
+        transcript_callback: Optional[Callable[[str], None]] = None,
         user_mic_capture: Optional[UserMicrophoneCapture] = None,
         memory: Optional[ConversationMemory] = None,
         jsd_threshold: float = JSD_THRESHOLD
@@ -56,6 +57,7 @@ class PipelineCoordinator:
         self.cue_cb = cue_callback
         self.speech_state_cb = speech_state_callback
         self.status_cb = status_callback
+        self.transcript_cb = transcript_callback
         self.jsd_threshold = jsd_threshold
 
         # Two-Way Conversational Memory & User Mic
@@ -76,6 +78,12 @@ class PipelineCoordinator:
         self._running = False
         self._lock = threading.Lock()
 
+        # Utterance Staging & Sentence Assembly (prevents premature cutoffs)
+        self.continuation_window_ms = VAD_CONTINUATION_WINDOW_MS
+        self._pending_utterance_audio: Optional[np.ndarray] = None
+        self._continuation_timer: Optional[threading.Timer] = None
+        self._staging_lock = threading.Lock()
+
         # Wire up Remote VAD listeners (speaker loopback)
         self.audio.register_chunk_callback(self._on_audio_chunk)
         self.vad.register_utterance_callback(self._on_utterance_complete)
@@ -93,11 +101,31 @@ class PipelineCoordinator:
         self.screen.start()
         self.audio.start()
         self.user_mic.start()
+        # Pre-warm AI models in background thread so the very first speech utterance processes instantly
+        threading.Thread(target=self._prewarm_pipelines, daemon=True, name="ModelPrewarmThread").start()
         logger.info("SocialLens Pipeline Coordinator started (Two-way Audio Active).")
+
+    def _prewarm_pipelines(self):
+        """Pre-loads Whisper and emotion perception models in background during app launch."""
+        try:
+            logger.info("Pre-warming perception models in background...")
+            dummy_wav = np.zeros(8000, dtype=np.float32)
+            self.semantic_pipeline.process(dummy_wav)
+            self.audio_pipeline.process(dummy_wav)
+            dummy_frame = np.zeros((224, 224, 3), dtype=np.uint8)
+            self.video_pipeline.process_keyframes([dummy_frame])
+            logger.info("Perception models pre-warmed successfully.")
+        except Exception as e:
+            logger.debug(f"Non-critical model pre-warm note: {e}")
 
     def stop(self):
         """Gracefully shuts down all threads, capture devices, and executor pools."""
         self._running = False
+        with self._staging_lock:
+            if self._continuation_timer is not None:
+                self._continuation_timer.cancel()
+                self._continuation_timer = None
+            self._pending_utterance_audio = None
         self.audio.stop()
         self.user_mic.stop()
         self.screen.stop()
@@ -141,6 +169,15 @@ class PipelineCoordinator:
         """Triggered on real-time speech onset or pause detection."""
         if not self._running:
             return
+
+        with self._staging_lock:
+            if is_speaking and self._continuation_timer is not None:
+                # Speaker resumed talking within continuation window:
+                # hold flush and continue accumulating clauses into a complete sentence
+                self._continuation_timer.cancel()
+                self._continuation_timer = None
+                logger.debug("Coordinator: Speech resumed before continuation window expired. Holding buffer.")
+
         if self.speech_state_cb is not None:
             try:
                 self.speech_state_cb(is_speaking)
@@ -153,8 +190,55 @@ class PipelineCoordinator:
                 logger.error(f"Error in status callback: {e}")
 
     def _on_utterance_complete(self, utterance_audio: np.ndarray):
-        """Triggered when speaker pauses (>= 500ms). Submits utterance for analysis."""
+        """
+        Triggered when speaker pauses. Stages audio to assemble full sentence turns
+        rather than firing on premature mid-sentence pauses.
+        """
         if not self._running or len(utterance_audio) == 0:
+            return
+
+        with self._staging_lock:
+            if self._continuation_timer is not None:
+                self._continuation_timer.cancel()
+                self._continuation_timer = None
+
+            if self._pending_utterance_audio is None:
+                self._pending_utterance_audio = utterance_audio
+            else:
+                self._pending_utterance_audio = np.concatenate([
+                    self._pending_utterance_audio,
+                    utterance_audio
+                ])
+                logger.debug(
+                    f"Coordinator: Appended audio segment. Total staged: "
+                    f"{len(self._pending_utterance_audio) / 16000.0:.2f}s"
+                )
+
+            # Safety cap: if staged audio exceeds 6s, flush immediately
+            if len(self._pending_utterance_audio) >= 16000 * 6:
+                self._flush_staged_utterance()
+                return
+
+            delay_sec = max(0.2, self.continuation_window_ms / 1000.0)
+            self._continuation_timer = threading.Timer(delay_sec, self._flush_staged_utterance)
+            self._continuation_timer.daemon = True
+            self._continuation_timer.name = "UtteranceContinuationTimer"
+            self._continuation_timer.start()
+
+    def _flush_staged_utterance(self):
+        """Flushes the assembled multi-clause utterance for end-to-end processing."""
+        with self._staging_lock:
+            if self._continuation_timer is not None:
+                self._continuation_timer.cancel()
+                self._continuation_timer = None
+
+            if self._pending_utterance_audio is None or len(self._pending_utterance_audio) == 0:
+                return
+
+            audio_to_process = self._pending_utterance_audio
+            self._pending_utterance_audio = None
+
+        if not self._running:
             return
 
         if self.status_cb is not None:
@@ -163,8 +247,7 @@ class PipelineCoordinator:
             except Exception as e:
                 logger.error(f"Error in status callback: {e}")
 
-        # Submit to orchestration pool and attach unhandled error logger
-        future = self._orchestration_executor.submit(self.process_utterance, utterance_audio)
+        future = self._orchestration_executor.submit(self.process_utterance, audio_to_process)
 
         def _log_future_done(f):
             exc = f.exception()
@@ -194,33 +277,80 @@ class PipelineCoordinator:
                 sample_count=4
             )
 
+            # Retrieve rolling conversation history for prompt conditioning
+            dialogue_history = self.memory.get_formatted_history()
+
             # 1. Parallel execution across all three modalities in dedicated perception pool
-            future_sem = self._perception_executor.submit(self.semantic_pipeline.process, utterance_audio)
+            future_sem = self._perception_executor.submit(
+                self.semantic_pipeline.process,
+                utterance_audio,
+                16000,
+                dialogue_history
+            )
             future_aud = self._perception_executor.submit(self.audio_pipeline.process, utterance_audio)
             future_vid = self._perception_executor.submit(self.video_pipeline.process_keyframes, keyframes)
 
             # Retrieve with modality-level timeouts to prevent any single hung model from freezing the HUD
             try:
-                transcript, p_semantic, sem_conf = future_sem.result(timeout=10.0)
+                transcript, p_semantic, sem_conf = future_sem.result(timeout=4.0)
             except Exception as e:
                 logger.warning(f"Semantic pipeline failed/timed out: {e}")
                 transcript, p_semantic, sem_conf = "[Speech detected]", normalize_distribution(np.ones(7)), 0.0
 
             try:
-                p_audio, prosody_features = future_aud.result(timeout=10.0)
+                p_audio, prosody_features = future_aud.result(timeout=4.0)
             except Exception as e:
                 logger.warning(f"Audio pipeline failed/timed out: {e}")
                 p_audio, prosody_features = normalize_distribution(np.ones(7)), {}
 
             try:
-                p_video, face_detected = future_vid.result(timeout=10.0)
+                p_video, face_detected = future_vid.result(timeout=4.0)
             except Exception as e:
                 logger.warning(f"Video pipeline failed/timed out: {e}")
                 p_video, face_detected = normalize_distribution(np.ones(7)), False
 
             # If transcript is empty, fallback to brief silence handling
-            if not transcript.strip():
+            clean_text = transcript.strip()
+            if not clean_text:
                 transcript = "[Speech detected without clear transcript]"
+                clean_text = transcript
+
+            # Always notify transcript listeners with the exact speech used for this overlay update,
+            # even if Gemini output is skipped or not triggered.
+            if self.transcript_cb is not None:
+                try:
+                    self.transcript_cb(clean_text)
+                except Exception as e:
+                    logger.error(f"Error in transcript callback: {e}")
+
+            # Low-information / filler filter:
+            # Prevents non-semantic fragments like "um", "uh", "hmm" from triggering
+            # false cross-modal mismatches and expensive LLM reasoning calls.
+            FILLER_WORDS = {
+                "um", "umm", "ummm", "uh", "uhh", "uhhh", "er", "err",
+                "ah", "ahh", "hmm", "hm", "huh"
+            }
+            words = [w.lower().strip(".,!?:;\"'()[]{}") for w in clean_text.split() if w.strip(".,!?:;\"'()[]{}")]
+            is_pure_filler = bool(words and all(w in FILLER_WORDS for w in words))
+
+            if is_pure_filler:
+                logger.info(
+                    f"Utterance '{clean_text}' filtered as low-information filler; skipping reasoner."
+                )
+                if self.telemetry_cb is not None:
+                    try:
+                        self.telemetry_cb(p_video, p_audio, p_semantic, 0.0)
+                    except Exception as e:
+                        logger.error(f"Error in telemetry callback: {e}")
+                return {
+                    "transcript": clean_text,
+                    "p_video": p_video,
+                    "p_audio": p_audio,
+                    "p_semantic": p_semantic,
+                    "jsd_score": 0.0,
+                    "is_trigger": False,
+                    "cue_data": {}
+                }
 
             # 2. Math Engine: Cross-modal conflict & JSD calculation
             conflict_data = analyze_cross_modal_conflict(
@@ -308,6 +438,7 @@ if QT_AVAILABLE:
         cue_signal = QtCore.pyqtSignal(dict)
         speech_state_signal = QtCore.pyqtSignal(bool)
         status_signal = QtCore.pyqtSignal(str)
+        transcript_signal = QtCore.pyqtSignal(str)
 
         def emit_telemetry(self, p_v, p_a, p_s, jsd):
             self.telemetry_signal.emit(p_v, p_a, p_s, jsd)
@@ -320,3 +451,6 @@ if QT_AVAILABLE:
 
         def emit_status(self, status: str):
             self.status_signal.emit(status)
+
+        def emit_transcript(self, text: str):
+            self.transcript_signal.emit(text)

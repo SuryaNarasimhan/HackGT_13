@@ -13,7 +13,7 @@ CANONICAL_EMOTIONS: List[str] = [
     "anger",
     "disgust",
     "fear",
-    "neutral"
+    "neutral",
 ]
 
 NUM_EMOTIONS: int = len(CANONICAL_EMOTIONS)
@@ -30,14 +30,18 @@ def emotion_to_index(emotion: str) -> int:
     """Returns index of the given emotion string (case-insensitive)."""
     norm = emotion.strip().lower()
     if norm not in EMOTION_TO_IDX:
-        raise ValueError(f"Unknown emotion '{emotion}'. Must be one of {CANONICAL_EMOTIONS}")
+        raise ValueError(
+            f"Unknown emotion '{emotion}'. Must be one of {CANONICAL_EMOTIONS}"
+        )
     return EMOTION_TO_IDX[norm]
 
 
 def index_to_emotion(index: int) -> str:
     """Returns emotion name corresponding to the index."""
     if index < 0 or index >= NUM_EMOTIONS:
-        raise IndexError(f"Index {index} out of bounds for {NUM_EMOTIONS} canonical emotions")
+        raise IndexError(
+            f"Index {index} out of bounds for {NUM_EMOTIONS} canonical emotions"
+        )
     return IDX_TO_EMOTION[index]
 
 
@@ -65,7 +69,9 @@ def normalize_distribution(vec: Union[np.ndarray, List[float]]) -> np.ndarray:
     return arr / total
 
 
-def validate_distribution(dist: Union[np.ndarray, List[float]], tolerance: float = 1e-3) -> bool:
+def validate_distribution(
+    dist: Union[np.ndarray, List[float]], tolerance: float = 1e-3
+) -> bool:
     """Validates that a vector is a proper probability distribution on the 7-simplex."""
     arr = np.asarray(dist, dtype=np.float64)
     if arr.shape != (NUM_EMOTIONS,):

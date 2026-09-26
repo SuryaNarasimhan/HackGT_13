@@ -13,12 +13,7 @@ from scipy import signal
 
 # Suppress harmless WASAPI loopback silence/buffer discontinuity warnings
 warnings.filterwarnings("ignore", message=".*data discontinuity in recording.*")
-try:
-    import soundcard as sc
-    if hasattr(sc, "SoundcardRuntimeWarning"):
-        warnings.filterwarnings("ignore", category=sc.SoundcardRuntimeWarning)
-except (ImportError, AttributeError):
-    pass
+warnings.filterwarnings("ignore", message=".*discontinuity.*")
 
 
 from app.config import (
@@ -72,10 +67,10 @@ class AudioLoopbackCapture:
         logger.info("Audio loopback capture thread started.")
 
     def stop(self):
-        """Stops the audio capture thread."""
+        """Stops the audio capture thread without blocking."""
         self._running = False
-        if self._thread is not None:
-            self._thread.join(timeout=1.5)
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=0.1)
             self._thread = None
         logger.info("Audio loopback capture stopped.")
 
@@ -86,29 +81,73 @@ class AudioLoopbackCapture:
 
         try:
             import soundcard as sc
+            warnings.filterwarnings("ignore", category=sc.SoundcardRuntimeWarning)
+            warnings.filterwarnings("ignore", message=".*discontinuity.*")
+
             # Get default speaker and its loopback microphone
             speaker = sc.default_speaker()
-            sc_mic = sc.get_microphone(id=str(speaker.name), include_loopback=True)
-            soundcard_loaded = True
-            logger.info(f"Connected to Windows WASAPI loopback: {speaker.name}")
+            try:
+                sc_mic = sc.get_microphone(id=str(speaker.name), include_loopback=True)
+            except Exception:
+                sc_mic = None
+
+            if sc_mic is None or not getattr(sc_mic, "isloopback", False):
+                # Search all active microphones for loopback
+                for mic in sc.all_microphones(include_loopback=True):
+                    if getattr(mic, "isloopback", False):
+                        sc_mic = mic
+                        break
+
+            if sc_mic is not None:
+                soundcard_loaded = True
+                logger.info(f"Connected to Windows WASAPI loopback: {sc_mic.name}")
+            else:
+                logger.warning("No Windows WASAPI loopback device found. Reverting to simulation.")
+                soundcard_loaded = False
         except Exception as e:
             logger.info(f"Soundcard WASAPI unavailable ({e}). Running in loopback simulation mode.")
             soundcard_loaded = False
 
         if soundcard_loaded and sc_mic is not None:
-            try:
-                native_rate = 48000
-                with sc_mic.recorder(samplerate=native_rate, channels=1) as recorder:
-                    chunk_native = int(native_rate * (self.chunk_size / self.target_rate))
-                    while self._running:
-                        data = recorder.record(numframes=chunk_native)
-                        # Downsample to 16kHz mono
-                        resampled = signal.resample_poly(data[:, 0], self.target_rate, native_rate)
-                        self._append_chunk(resampled.astype(np.float32))
-            except Exception as e:
-                logger.warning(f"Native recorder error: {e}. Switching to simulation fallback.")
+            native_rate = 48000
+            chunk_native = int(native_rate * (self.chunk_size / self.target_rate))
+            while self._running:
+                try:
+                    with sc_mic.recorder(samplerate=native_rate, channels=1) as recorder:
+                        last_log_time = time.time()
+                        while self._running:
+                            try:
+                                data = recorder.record(numframes=chunk_native)
+                            except Exception as read_err:
+                                if not self._running:
+                                    break
+                                # Transient buffer glitch or tab switch: sleep briefly and keep recording
+                                time.sleep(0.04)
+                                continue
 
-        # Fallback simulation loop (keeps thread alive, feeds silence/gentle ambient noise)
+                            if not self._running or data is None or len(data) == 0:
+                                continue
+
+                            # Downsample to 16kHz mono
+                            resampled = signal.resample_poly(data[:, 0], self.target_rate, native_rate)
+                            chunk_16k = resampled.astype(np.float32)
+                            self._append_chunk(chunk_16k)
+
+                            now = time.time()
+                            if now - last_log_time >= 5.0:
+                                rms = float(np.sqrt(np.mean(chunk_16k**2)))
+                                if rms > 0.001:
+                                    logger.info(
+                                        f"AudioLoopback active: stream RMS = {rms:.4f}, peak = {float(np.max(np.abs(chunk_16k))):.4f}"
+                                    )
+                                last_log_time = now
+                except Exception as e:
+                    if not self._running:
+                        break
+                    logger.debug(f"AudioLoopback recorder session reset: {e}. Reconnecting...")
+                    time.sleep(0.3)
+
+        # Fallback simulation loop (only used if soundcard hardware was completely unavailable)
         while self._running:
             time.sleep(self.chunk_size / self.target_rate)
             # Simulated ambient low-level silence
