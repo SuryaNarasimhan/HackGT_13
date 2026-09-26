@@ -1,6 +1,18 @@
 # MSAS Architecture
 
-Status: Proposed hackathon architecture; implementation has not yet been built.
+Status: Proposed AI architecture with an initial Electron desktop capture/UI prototype. AI analysis is not yet implemented.
+
+## Current prototype and first trial
+
+The initial implementation is a Windows-only laptop desktop application built with Electron and local HTML/CSS/JavaScript. It does not require a localhost web server. Google Meet is the first manual trial target; capture is based on operating-system window/screen sources, with no Meet-specific APIs or page selectors. macOS and Linux are out of scope.
+
+The prototype provides a setup window, source picker, local video preview, opt-in system-output audio with a level meter, a display-wide click-through border, and separate floating controls. A selected window does not isolate system audio. The microphone is not requested. Context fields stay in the renderer for the session and are reserved for future inference; they do not drive analysis yet.
+
+The border appears on the selected screen, or on the setup window's display when a captured window has no display identifier. It does not track a moving call window. Stop, setup-window closure, capture termination, or display disconnection releases the session and removes overlays. Four scripted cue examples run in an explicitly labeled demo mode with no capture. Live capture never emits scripted interpretations.
+
+The transcript, acoustic interpretation, facial observations, model fusion, and evaluation sections below describe the intended system, not completed features. Windows call capture still requires a manual Google Meet trial; no universal call compatibility is claimed.
+
+The selected source is granted through Electron's display-media handler. Electron 44 also makes a desktop `media` permission request with no physical device types before this handler runs. Permission checks allow that request only while an explicit capture is pending in the setup window's main frame; microphone/camera device requests remain denied. Live overlays are created after video playback starts. Startup and playback have bounded waits, late streams are stopped, and capture errors expose the failed stage and native error rather than a generic cross-platform message.
 
 ## 1. Purpose and success criteria
 
@@ -21,10 +33,10 @@ Success means a user can start a session, explicitly select context, capture a s
 - English speech transcription, with user-selected language/region and optional conversation context. These settings guide interpretation; they do not imply multilingual transcription support.
 - Detection of possible sarcasm, jokes, slang, and idioms.
 - Time-aligned speech, acoustic observations, and optional visual observations.
-- A border cue within the companion interface, paired with a text label and an expandable explanation.
+- A display-wide desktop border cue, paired with a floating text label and an expandable explanation.
 - An explicit start/stop control, processing indicator, and session-only memory.
 
-A system-wide border over another application is an optional native integration. The MVP companion border must not be represented as an overlay on every application. Facial observations are an optional supporting input, and the product must work when video is unavailable or disabled.
+A desktop overlay over ordinary application windows is part of the prototype. Its behavior above exclusive full-screen or OS-controlled surfaces requires separate validation. Facial observations are an optional supporting input, and the intended analysis must work when video is unavailable or disabled; the current capture UI requires a video source and can operate without system audio.
 
 ### Outside the MVP
 
@@ -205,4 +217,4 @@ Use live inference in the working demo. If prerecorded inputs are used for repro
 5. Tune abstention and alert frequency; test cleanup, latency, accessibility, and failure states.
 6. Prepare the public repository, short project write-up, and consented demo video. Exclude secrets and private media.
 
-Technology choices intentionally remain open in this document. Before implementation, select the capture environment, client packaging, transcription engine, acoustic/visual analyzers, interpretation model, and local/remote processing boundary. Validate their latency, permissions, licensing, and retention behavior against this architecture. No existing implementation or provider capability is assumed.
+Electron is the selected desktop shell, with Windows as the first trial environment and operating-system capture as the integration boundary. Transcription, acoustic/visual analyzers, interpretation model, installer packaging, and any remote processing boundary remain open. Validate their latency, permissions, licensing, and retention behavior against this architecture. The current prototype uses local preview only and makes no inference-provider calls.
