@@ -7,6 +7,14 @@ import unittest
 import numpy as np
 
 from app.pipelines.video_pipeline import VideoPipeline
+from app.pipelines.speaker_baseline import (
+    STATUS_NO_FACE,
+    STATUS_UNAVAILABLE,
+    STATUS_USED,
+    STATUS_USUAL,
+    STATUS_WARMING_UP,
+    SpeakerBaseline,
+)
 from app.pipelines.taxonomy import (
     validate_distribution,
     get_top_emotion,
@@ -107,6 +115,65 @@ class TestVideoPipeline(unittest.TestCase):
         dist_bgr = self.pipeline.classify_face_crop(face_crop, color_order="BGR")
         self.assertEqual(dist_bgr.shape, (NUM_EMOTIONS,))
         self.assertTrue(validate_distribution(dist_bgr))
+
+    def test_skin_colored_non_faces_rejected_when_detector_available(self):
+        """When OpenCV's detector finds no face, random noise or a beige wall is not a face."""
+        if self.pipeline._cv2 is None or self.pipeline._face_cascade is None:
+            self.skipTest("OpenCV face detector unavailable")
+
+        noise = (np.random.default_rng(0).random((720, 1280, 3)) * 255).astype(np.uint8)
+        empty_room = np.full((720, 1280, 3), 32, dtype=np.uint8)
+        empty_room[100:500, 300:900] = [205, 170, 130]   # Beige wall in the video tile
+        empty_room[560:620, 200:1000] = [150, 100, 60]   # Wooden desk
+
+        self.assertEqual(self.pipeline.detect_face(noise), (False, None))
+        self.assertEqual(self.pipeline.detect_face(empty_room), (False, None))
+
+    def test_relative_no_face_is_missing(self):
+        """No face means the face channel is missing, not a deadpan face, and nothing is learned."""
+        baseline = SpeakerBaseline(warmup=2)
+        blank_frame = np.zeros((10, 10, 3), dtype=np.uint8)
+
+        _, _, status = self.pipeline.process_keyframes_relative([blank_frame], baseline)
+
+        self.assertEqual(status, STATUS_NO_FACE)
+        self.assertEqual(len(baseline), 0)
+
+    def test_relative_without_model_is_unavailable(self):
+        """Without the FER model every face reads as the same placeholder, so the face can't count."""
+        self.pipeline._load_emotion_classifier = lambda: None
+        self.pipeline._emotion_classifier = None
+        baseline = SpeakerBaseline(warmup=2)
+
+        _, _, status = self.pipeline.process_keyframes_relative([self._create_synthetic_face_frame()], baseline)
+
+        self.assertEqual(status, STATUS_UNAVAILABLE)
+        self.assertEqual(len(baseline), 0)
+
+    def test_relative_learns_usual_expression(self):
+        """A face that never smiles becomes 'usual'; a sudden smile counts as different from usual."""
+        try:
+            import PIL  # noqa: F401  (classify_face_crop hands the crop to the model as a PIL image)
+        except ImportError:
+            self.skipTest("Pillow unavailable")
+
+        reading = {"label": "neutral"}
+
+        def fake_fer_model(image):
+            other = "happy" if reading["label"] == "neutral" else "neutral"
+            return [{"label": reading["label"], "score": 0.9}, {"label": other, "score": 0.1}]
+
+        self.pipeline._emotion_classifier = fake_fer_model
+        baseline = SpeakerBaseline(warmup=3)
+        frame = self._create_synthetic_face_frame()
+
+        statuses = [self.pipeline.process_keyframes_relative([frame], baseline)[2] for _ in range(4)]
+        self.assertEqual(statuses, [STATUS_WARMING_UP] * 3 + [STATUS_USUAL])
+
+        reading["label"] = "happy"
+        _, p_compare, status = self.pipeline.process_keyframes_relative([frame], baseline)
+        self.assertEqual(status, STATUS_USED)
+        self.assertEqual(get_top_emotion(p_compare)[0], "joy")
 
 
 if __name__ == "__main__":

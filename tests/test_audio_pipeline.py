@@ -7,6 +7,12 @@ import unittest
 import numpy as np
 
 from app.pipelines.audio_pipeline import AudioPipeline
+from app.pipelines.speaker_baseline import (
+    STATUS_TOO_QUIET,
+    STATUS_USUAL,
+    STATUS_WARMING_UP,
+    SpeakerBaseline,
+)
 from app.pipelines.taxonomy import (
     validate_distribution,
     get_top_emotion,
@@ -38,6 +44,47 @@ class TestAudioPipeline(unittest.TestCase):
         envelope = 0.5 + 0.4 * np.sin(2 * np.pi * 2.5 * t)
         waveform = envelope * np.sin(phase)
         return waveform.astype(np.float32)
+
+    def _generate_melody(self, base_freq: float, depth_semitones: float, duration: float = 2.0) -> np.ndarray:
+        """Generates the same intonation contour (in semitones) around any base pitch."""
+        t = np.linspace(0, duration, int(self.sample_rate * duration), endpoint=False)
+        inst_freq = base_freq * 2 ** (depth_semitones * np.sin(2 * np.pi * 1.5 * t) / 12.0)
+        phase = 2 * np.pi * np.cumsum(inst_freq) / self.sample_rate
+        waveform = 0.6 * np.sin(phase) + 0.2 * np.sin(2 * phase)
+        return waveform.astype(np.float32)
+
+    def test_pitch_spread_same_for_low_and_high_voices(self):
+        """
+        The same melody gets the same pitch spread and monotone verdict in a low and a high voice.
+        The old 18 Hz cutoff called the 100 Hz voice monotone and the 200 Hz voice expressive.
+        """
+        low = self.pipeline.extract_prosody_features(self._generate_melody(100.0, 3.0))
+        high = self.pipeline.extract_prosody_features(self._generate_melody(200.0, 3.0))
+
+        self.assertAlmostEqual(low["pitch_spread_st"], high["pitch_spread_st"], delta=0.5)
+        self.assertFalse(low["is_monotone"])
+        self.assertFalse(high["is_monotone"])
+        self.assertLess(low["pitch_std"], 18.0)  # Would have been "monotone" under the Hz rule
+
+    def test_relative_too_little_voice(self):
+        """Silence is too little voice to judge, and teaches the baseline nothing."""
+        baseline = SpeakerBaseline(warmup=3)
+        p_display, p_compare, features = self.pipeline.process_relative(
+            np.zeros(self.sample_rate, dtype=np.float32), baseline
+        )
+
+        self.assertEqual(features["status"], STATUS_TOO_QUIET)
+        self.assertTrue(np.allclose(p_display, p_compare))
+        self.assertEqual(len(baseline), 0)
+
+    def test_relative_consistently_flat_voice_becomes_usual(self):
+        """A voice that is always monotone is learned as this speaker's usual, not flagged."""
+        baseline = SpeakerBaseline(warmup=3)
+        audio = self._generate_monotone_audio(duration=2.0, freq=135.0)
+
+        statuses = [self.pipeline.process_relative(audio, baseline)[2]["status"] for _ in range(5)]
+
+        self.assertEqual(statuses, [STATUS_WARMING_UP] * 3 + [STATUS_USUAL] * 2)
 
     def test_monotone_deadpan_detection(self):
         """Monotone audio with flat pitch must produce high neutral probability."""

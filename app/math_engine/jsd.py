@@ -3,10 +3,13 @@ Multi-Distribution Jensen-Shannon Divergence (JSD) Engine for SocialLens
 Computes cross-modal divergence across Video, Audio, and Semantic emotion vectors.
 """
 
-from typing import Dict, Tuple, Union
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 from app.config import JSD_EPSILON, JSD_THRESHOLD, JSD_PAIRWISE_THRESHOLD
 from app.pipelines.taxonomy import normalize_distribution, NUM_EMOTIONS
+
+# Channel pairs in reporting order (ties resolve to the earlier pair)
+CHANNEL_PAIRS = (("words", "tone"), ("words", "face"), ("tone", "face"))
 
 
 def shannon_entropy(p: np.ndarray, eps: float = JSD_EPSILON) -> float:
@@ -85,54 +88,85 @@ def compute_tri_modal_jsd(
     return float(np.clip(jsd_raw, 0.0, np.log2(3.0)))
 
 
+def compute_multi_jsd(
+    distributions: Sequence[Union[np.ndarray, list]],
+    eps: float = JSD_EPSILON
+) -> float:
+    """
+    Generalized Jensen-Shannon Divergence across two or more distributions:
+        M = mean(P_i)
+        JSD = [H(M) - mean(H(P_i))] / log2(n)
+    Normalized to [0, 1]. Equals compute_pairwise_jsd for two inputs and
+    compute_tri_modal_jsd(normalized=True) for three.
+    """
+    arrs = [normalize_distribution(d) for d in distributions]
+    if len(arrs) < 2:
+        return 0.0
+
+    m = np.mean(arrs, axis=0)
+    jsd_raw = shannon_entropy(m, eps) - float(np.mean([shannon_entropy(a, eps) for a in arrs]))
+    return float(np.clip(jsd_raw / np.log2(len(arrs)), 0.0, 1.0))
+
+
 def analyze_cross_modal_conflict(
     p_v: Union[np.ndarray, list],
     p_a: Union[np.ndarray, list],
     p_s: Union[np.ndarray, list],
     threshold: float = JSD_THRESHOLD,
     pairwise_threshold: float = JSD_PAIRWISE_THRESHOLD,
-    eps: float = JSD_EPSILON
-) -> Dict[str, Union[float, Dict[str, float], Tuple[str, str], bool]]:
+    eps: float = JSD_EPSILON,
+    informative: Optional[Dict[str, bool]] = None
+) -> Dict[str, Union[float, Dict[str, float], Optional[Tuple[str, str]], bool, List[str]]]:
     """
     Performs comprehensive cross-modal divergence analysis:
-    - Calculates tri-modal normalized JSD.
-    - Calculates all three pairwise JSDs (words vs tone, words vs face, tone vs face).
-    - Identifies the pair with highest friction.
-    - Determines if the trigger threshold is exceeded (either tri-modal or max-pairwise).
+    - Leaves out channels marked not informative in `informative` ({"face"|"tone"|"words": bool};
+      missing keys count as informative). A missing face or a delivery that matches the
+      speaker's usual style carries no information and must not count as a clash.
+    - Calculates the normalized JSD across the remaining channels (tri-modal when all three count).
+    - Calculates the pairwise JSDs between the remaining channels and finds the strongest clash.
+    - Triggers only when the words are part of the strongest clash: tone vs. face alone never triggers.
+      With fewer than three channels, only the stricter pairwise threshold applies.
     """
-    v = normalize_distribution(p_v)
-    a = normalize_distribution(p_a)
-    s = normalize_distribution(p_s)
-    
-    tri_jsd = compute_tri_modal_jsd(v, a, s, normalized=True, eps=eps)
-    
-    pw_words_tone = compute_pairwise_jsd(s, a, eps=eps)
-    pw_words_face = compute_pairwise_jsd(s, v, eps=eps)
-    pw_tone_face = compute_pairwise_jsd(a, v, eps=eps)
-    
-    pairwise = {
-        "words_vs_tone": pw_words_tone,
-        "words_vs_face": pw_words_face,
-        "tone_vs_face": pw_tone_face
+    informative = informative or {}
+    channels = {
+        name: normalize_distribution(dist)
+        for name, dist in (("face", p_v), ("tone", p_a), ("words", p_s))
+        if informative.get(name, True)
     }
-    
+
+    if len(channels) < 2:
+        return {
+            "tri_modal_jsd": 0.0,
+            "pairwise_jsd": {},
+            "max_conflict_pair": None,
+            "max_conflict_value": 0.0,
+            "is_trigger": False,
+            "channels_used": sorted(channels)
+        }
+
+    # Keeps its historical key name; covers only the channels used
+    jsd = compute_multi_jsd(list(channels.values()), eps=eps)
+
+    pairwise = {
+        f"{a}_vs_{b}": compute_pairwise_jsd(channels[a], channels[b], eps=eps)
+        for a, b in CHANNEL_PAIRS
+        if a in channels and b in channels
+    }
+
     # Identify maximum conflict pair
     max_pair_name = max(pairwise, key=pairwise.get)
     max_conflict_val = pairwise[max_pair_name]
-    pair_mapping = {
-        "words_vs_tone": ("words", "tone"),
-        "words_vs_face": ("words", "face"),
-        "tone_vs_face": ("tone", "face")
-    }
-    
-    # Trigger if tri-modal divergence is high OR a strong pairwise clash exists
-    is_trigger = bool(tri_jsd >= threshold or max_conflict_val >= pairwise_threshold)
-    
+    max_pair = tuple(max_pair_name.split("_vs_"))
+
+    strong = max_conflict_val >= pairwise_threshold or (len(channels) == 3 and jsd >= threshold)
+    is_trigger = bool(strong and "words" in max_pair)
+
     return {
-        "tri_modal_jsd": tri_jsd,
+        "tri_modal_jsd": jsd,
         "pairwise_jsd": pairwise,
-        "max_conflict_pair": pair_mapping[max_pair_name],
+        "max_conflict_pair": max_pair,
         "max_conflict_value": max_conflict_val,
-        "is_trigger": is_trigger
+        "is_trigger": is_trigger,
+        "channels_used": sorted(channels)
     }
 

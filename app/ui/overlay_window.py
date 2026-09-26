@@ -182,7 +182,7 @@ if QT_AVAILABLE:
         def enable_demo_mode(self, demo_runner):
             """Enables demo mode HUD controls and hotkeys."""
             self.demo_runner = demo_runner
-            self.status_pill.setText("● Demo Mode (Press 1, 2, 3)")
+            self.status_pill.setText("● Demo Mode (Press 1-4)")
             self.status_pill.setStyleSheet(
                 "color: #FBBF24; background-color: rgba(245, 158, 11, 0.15); border: 1px solid rgba(245, 158, 11, 0.3); border-radius: 10px; padding: 2px 8px;"
             )
@@ -205,9 +205,14 @@ if QT_AVAILABLE:
             btn_stress.setStyleSheet("font-size: 9px; padding: 3px 6px; background-color: rgba(248, 113, 113, 0.2); color: #F87171; border-radius: 6px;")
             btn_stress.clicked.connect(lambda: self.trigger_demo_scenario(3))
 
+            btn_flat = QtWidgets.QPushButton("[4] Flat Praise", demo_box)
+            btn_flat.setStyleSheet("font-size: 9px; padding: 3px 6px; background-color: rgba(148, 163, 184, 0.2); color: #94A3B8; border-radius: 6px;")
+            btn_flat.clicked.connect(lambda: self.trigger_demo_scenario(4))
+
             demo_layout.addWidget(btn_sarcasm)
             demo_layout.addWidget(btn_praise)
             demo_layout.addWidget(btn_stress)
+            demo_layout.addWidget(btn_flat)
 
             self.main_layout.addWidget(demo_box)
 
@@ -218,7 +223,7 @@ if QT_AVAILABLE:
                 return
             self._demo_in_progress = True
 
-            scenario_names = {1: "Sarcasm", 2: "Praise", 3: "Frustration"}
+            scenario_names = {1: "Sarcasm", 2: "Praise", 3: "Frustration", 4: "Flat Praise"}
             name = scenario_names.get(scenario_id, str(scenario_id))
             self.status_pill.setText(f"● Analyzing [{name}]...")
             self.status_pill.setStyleSheet(
@@ -240,13 +245,13 @@ if QT_AVAILABLE:
         def _restore_demo_pill(self):
             """Restores demo status pill label."""
             if getattr(self, "demo_runner", None) is not None:
-                self.status_pill.setText("● Demo Mode (Press 1, 2, 3)")
+                self.status_pill.setText("● Demo Mode (Press 1-4)")
                 self.status_pill.setStyleSheet(
                     "color: #FBBF24; background-color: rgba(245, 158, 11, 0.15); border: 1px solid rgba(245, 158, 11, 0.3); border-radius: 10px; padding: 2px 8px;"
                 )
 
         def keyPressEvent(self, event):
-            """Hotkey triggers (keys 1, 2, 3) for live judging presentations."""
+            """Hotkey triggers (keys 1-4) for live judging presentations."""
             if getattr(self, "demo_runner", None) is not None:
                 key = event.key()
                 if key == QtCore.Qt.Key.Key_1:
@@ -259,6 +264,10 @@ if QT_AVAILABLE:
                     return
                 elif key == QtCore.Qt.Key.Key_3:
                     self.trigger_demo_scenario(3)
+                    event.accept()
+                    return
+                elif key == QtCore.Qt.Key.Key_4:
+                    self.trigger_demo_scenario(4)
                     event.accept()
                     return
             super().keyPressEvent(event)

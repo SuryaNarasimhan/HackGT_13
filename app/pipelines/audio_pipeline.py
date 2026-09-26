@@ -9,7 +9,13 @@ import logging
 from typing import Dict, Optional, Tuple, Union
 import numpy as np
 
-from app.config import AUDIO_SAMPLE_RATE, AUDIO_EMOTION_MODEL
+from app.config import (
+    AUDIO_SAMPLE_RATE,
+    AUDIO_EMOTION_MODEL,
+    MIN_VOICED_FRAMES,
+    MONOTONE_SPREAD_SEMITONES,
+)
+from app.pipelines.speaker_baseline import STATUS_TOO_QUIET, STATUS_USED, SpeakerBaseline
 from app.pipelines.taxonomy import (
     CANONICAL_EMOTIONS,
     EMOTION_TO_IDX,
@@ -95,6 +101,7 @@ class AudioPipeline:
         - Energy Variance: Expressive dynamic range vs. flat delivery
         - Pitch (F0) Estimation via normalized autocorrelation
         - Pitch Mean and Standard Deviation: Monotone vs. melodic inflection
+        - Pitch Spread in semitones: voice-independent inflection used for the monotone check
         - Zero Crossing Rate (ZCR): Voice roughness / tension
         """
         if len(audio) == 0:
@@ -103,6 +110,8 @@ class AudioPipeline:
                 "energy_var": 0.0,
                 "pitch_mean": 0.0,
                 "pitch_std": 0.0,
+                "pitch_spread_st": 0.0,
+                "voiced_frames": 0,
                 "is_monotone": True,
                 "zcr": 0.0
             }
@@ -151,8 +160,14 @@ class AudioPipeline:
         pitch_mean = float(np.mean(pitches)) if pitches else 140.0
         pitch_std = float(np.std(pitches)) if pitches else 0.0
 
-        # Monotone detection heuristic: low pitch standard deviation
-        is_monotone = bool(pitch_std < 18.0)
+        # Pitch spread in semitones, so the same melody scores the same in low and high voices
+        # (a fixed Hz cutoff reads low voices as flatter). Median absolute deviation instead of
+        # std, because the autocorrelation tracker occasionally jumps an octave.
+        semitones = 12.0 * np.log2(pitches) if pitches else np.zeros(1)
+        pitch_spread_st = float(1.4826 * np.median(np.abs(semitones - np.median(semitones))))
+
+        # Monotone detection heuristic: low pitch spread
+        is_monotone = bool(pitch_spread_st < MONOTONE_SPREAD_SEMITONES)
 
         # Zero-Crossing Rate
         zcr = float(np.mean(np.abs(np.diff(np.sign(audio_f)))) / 2.0)
@@ -162,6 +177,8 @@ class AudioPipeline:
             "energy_var": energy_var,
             "pitch_mean": pitch_mean,
             "pitch_std": pitch_std,
+            "pitch_spread_st": pitch_spread_st,
+            "voiced_frames": len(pitches),
             "is_monotone": is_monotone,
             "zcr": zcr
         }
@@ -256,3 +273,24 @@ class AudioPipeline:
         features = self.extract_prosody_features(audio)
         p_audio = self.classify_speech_emotion(audio)
         return p_audio, features
+
+    def process_relative(
+        self,
+        audio: np.ndarray,
+        baseline: SpeakerBaseline
+    ) -> Tuple[np.ndarray, np.ndarray, Dict[str, float]]:
+        """
+        Processes audio and compares the tone with this speaker's usual delivery.
+        Returns (p_display, p_compare, prosody_features) with features["status"] set.
+        p_display is the raw reading for the HUD. p_compare holds the emotions stronger than
+        usual when status is STATUS_USED; any other status means the tone must not count.
+        """
+        p_audio, features = self.process(audio)
+        if features.get("voiced_frames", 0) < MIN_VOICED_FRAMES:
+            # Too little voice to judge, or to learn this speaker's style from
+            features["status"] = STATUS_TOO_QUIET
+            return p_audio, p_audio, features
+
+        status, p_relative = baseline.compare_and_update(p_audio)
+        features["status"] = status
+        return p_audio, (p_relative if status == STATUS_USED else p_audio), features

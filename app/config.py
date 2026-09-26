@@ -42,6 +42,16 @@ JSD_LEVEL_BALANCED = 0.30          # Below this is considered congruent
 JSD_LEVEL_NUANCE = 0.40            # Between 0.30 and 0.40 is subtle nuance
                                    # Above 0.40 or pairwise >= 0.65 is cue trigger
 
+# ---------------------------------------------------------------------------
+# Per-Speaker Baselines (compare each speaker to themselves)
+# One-on-one calls: all loopback audio is treated as a single remote speaker.
+# ---------------------------------------------------------------------------
+BASELINE_WARMUP_UTTERANCES = int(os.getenv("BASELINE_WARMUP_UTTERANCES", "5"))  # Voice/face ignored until then
+BASELINE_WINDOW_UTTERANCES = 30    # Utterances of history kept per channel
+BASELINE_SHIFT_JSD = float(os.getenv("BASELINE_SHIFT_JSD", "0.15"))  # Below this, a channel matches their usual
+MIN_VOICED_FRAMES = 20             # ~0.3 s of voiced speech needed to judge a voice
+MONOTONE_SPREAD_SEMITONES = 1.5    # DSP fallback: pitch spread below this reads as monotone
+
 
 # ---------------------------------------------------------------------------
 # Machine Learning & AI Models

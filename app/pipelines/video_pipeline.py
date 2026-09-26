@@ -10,6 +10,12 @@ from typing import Dict, List, Optional, Tuple, Union
 import numpy as np
 
 from app.config import FRAME_SAMPLE_COUNT, VIDEO_EMOTION_MODEL
+from app.pipelines.speaker_baseline import (
+    STATUS_NO_FACE,
+    STATUS_UNAVAILABLE,
+    STATUS_USED,
+    SpeakerBaseline,
+)
 from app.pipelines.taxonomy import (
     CANONICAL_EMOTIONS,
     EMOTION_TO_IDX,
@@ -109,7 +115,8 @@ class VideoPipeline:
         """
         Detects primary face bounding box (x, y, w, h) in an RGB or BGR frame.
         Uses OpenCV Haar cascades with histogram equalization when cv2 is available,
-        falling back to a biometric skin-color and aspect-ratio geometry validator.
+        falling back to a biometric skin-color and aspect-ratio geometry validator only
+        when the cascade cannot run.
         Returns: (face_detected, bbox_tuple)
         """
         if frame is None or frame.size == 0:
@@ -138,15 +145,19 @@ class VideoPipeline:
                     minNeighbors=3,
                     minSize=(30, 30)
                 )
-                if len(faces) > 0:
-                    # Select largest face by area
-                    largest_face = max(faces, key=lambda f: f[2] * f[3])
-                    return True, tuple(int(v) for v in largest_face)
+                if len(faces) == 0:
+                    # Trust the detector's "no face". The skin-color fallback also matches beige
+                    # walls, wood and noise, and a wrong face is worse than a missing one.
+                    return False, None
+                # Select largest face by area
+                largest_face = max(faces, key=lambda f: f[2] * f[3])
+                return True, tuple(int(v) for v in largest_face)
             except Exception as e:
                 logger.warning(f"Face cascade detection failed: {e}")
 
-        # Biometric fallback: checks for human skin cluster and face aspect-ratio geometry
-        # Replaces fragile `std > 10` that falsely flagged desktop UI/wallpaper as faces.
+        # Biometric fallback when the cascade cannot run: checks for human skin cluster and
+        # face aspect-ratio geometry. Replaces fragile `std > 10` that falsely flagged
+        # desktop UI/wallpaper as faces.
         return self._detect_face_heuristic(frame, color_order=color_order)
 
     def _detect_face_heuristic(
@@ -339,3 +350,25 @@ class VideoPipeline:
         # Mean probability vector across keyframes
         mean_vec = np.mean(detected_vectors, axis=0)
         return normalize_distribution(mean_vec), True
+
+    def process_keyframes_relative(
+        self,
+        frames: List[np.ndarray],
+        baseline: SpeakerBaseline
+    ) -> Tuple[np.ndarray, np.ndarray, str]:
+        """
+        Aggregates keyframes and compares the expression with this speaker's usual face.
+        Returns (p_display, p_compare, status). No face means the channel is missing, not a
+        deadpan face. p_compare holds the emotions stronger than usual when status is
+        STATUS_USED; any other status means the face must not count.
+        """
+        p_video, face_detected = self.process_keyframes(frames)
+        if not face_detected:
+            return p_video, p_video, STATUS_NO_FACE
+
+        if self._emotion_classifier is None:
+            # Without the FER model every face reads as the same placeholder distribution
+            return p_video, p_video, STATUS_UNAVAILABLE
+
+        status, p_relative = baseline.compare_and_update(p_video)
+        return p_video, (p_relative if status == STATUS_USED else p_video), status

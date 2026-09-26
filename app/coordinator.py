@@ -21,7 +21,13 @@ from app.conversation_memory import ConversationMemory
 from app.math_engine.jsd import analyze_cross_modal_conflict
 from app.pipelines.audio_pipeline import AudioPipeline
 from app.pipelines.semantic_pipeline import SemanticPipeline
-from app.pipelines.taxonomy import get_top_emotion
+from app.pipelines.speaker_baseline import (
+    STATUS_NO_WORDS,
+    STATUS_UNAVAILABLE,
+    STATUS_USED,
+    SpeakerBaseline,
+)
+from app.pipelines.taxonomy import get_top_emotion, normalize_distribution
 from app.pipelines.video_pipeline import VideoPipeline
 from app.ui.qt_compat import QT_AVAILABLE, QtCore
 
@@ -47,7 +53,8 @@ class PipelineCoordinator:
         status_callback: Optional[Callable[[str], None]] = None,
         user_mic_capture: Optional[UserMicrophoneCapture] = None,
         memory: Optional[ConversationMemory] = None,
-        jsd_threshold: float = JSD_THRESHOLD
+        jsd_threshold: float = JSD_THRESHOLD,
+        channel_status_callback: Optional[Callable[[Dict[str, str]], None]] = None
     ):
         self.audio = audio_capture
         self.screen = screen_capture
@@ -56,7 +63,14 @@ class PipelineCoordinator:
         self.cue_cb = cue_callback
         self.speech_state_cb = speech_state_callback
         self.status_cb = status_callback
+        self.channel_status_cb = channel_status_callback
         self.jsd_threshold = jsd_threshold
+
+        # Per-speaker baselines: voice and face are compared with this speaker's own usual
+        # delivery, so a naturally flat voice or rarely-smiling face isn't read as subtext.
+        # One-on-one calls: all loopback audio is treated as one remote speaker.
+        self.voice_baseline = SpeakerBaseline()
+        self.face_baseline = SpeakerBaseline()
 
         # Two-Way Conversational Memory & User Mic
         self.memory = memory or ConversationMemory(max_turns=6)
@@ -103,6 +117,10 @@ class PipelineCoordinator:
         self.screen.stop()
         self._orchestration_executor.shutdown(wait=False, cancel_futures=True)
         self._perception_executor.shutdown(wait=False, cancel_futures=True)
+        # Session-only memory: forget the speaker's learned style and the conversation
+        self.voice_baseline.reset()
+        self.face_baseline.reset()
+        self.memory.clear()
         logger.info("SocialLens Pipeline Coordinator stopped.")
 
     def _on_user_mic_chunk(self, chunk: np.ndarray):
@@ -194,10 +212,15 @@ class PipelineCoordinator:
                 sample_count=4
             )
 
-            # 1. Parallel execution across all three modalities in dedicated perception pool
+            # 1. Parallel execution across all three modalities in dedicated perception pool.
+            # Voice and face come back as (raw reading, reading compared with this speaker's usual, status).
             future_sem = self._perception_executor.submit(self.semantic_pipeline.process, utterance_audio)
-            future_aud = self._perception_executor.submit(self.audio_pipeline.process, utterance_audio)
-            future_vid = self._perception_executor.submit(self.video_pipeline.process_keyframes, keyframes)
+            future_aud = self._perception_executor.submit(
+                self.audio_pipeline.process_relative, utterance_audio, self.voice_baseline
+            )
+            future_vid = self._perception_executor.submit(
+                self.video_pipeline.process_keyframes_relative, keyframes, self.face_baseline
+            )
 
             # Retrieve with modality-level timeouts to prevent any single hung model from freezing the HUD
             try:
@@ -207,33 +230,48 @@ class PipelineCoordinator:
                 transcript, p_semantic, sem_conf = "[Speech detected]", normalize_distribution(np.ones(7)), 0.0
 
             try:
-                p_audio, prosody_features = future_aud.result(timeout=10.0)
+                p_audio, p_audio_cmp, prosody_features = future_aud.result(timeout=10.0)
+                tone_status = prosody_features.get("status", STATUS_UNAVAILABLE)
             except Exception as e:
                 logger.warning(f"Audio pipeline failed/timed out: {e}")
-                p_audio, prosody_features = normalize_distribution(np.ones(7)), {}
+                p_audio = p_audio_cmp = normalize_distribution(np.ones(7))
+                prosody_features, tone_status = {}, STATUS_UNAVAILABLE
 
             try:
-                p_video, face_detected = future_vid.result(timeout=10.0)
+                p_video, p_video_cmp, face_status = future_vid.result(timeout=10.0)
             except Exception as e:
                 logger.warning(f"Video pipeline failed/timed out: {e}")
-                p_video, face_detected = normalize_distribution(np.ones(7)), False
+                p_video = p_video_cmp = normalize_distribution(np.ones(7))
+                face_status = STATUS_UNAVAILABLE
 
             # If transcript is empty, fallback to brief silence handling
             if not transcript.strip():
                 transcript = "[Speech detected without clear transcript]"
+            has_words = not transcript.startswith("[Speech detected")
+
+            # Only the words and channels that differ from this speaker's usual count toward mismatch.
+            # A missing face or a delivery that is normal for them carries no information.
+            channel_status = {
+                "words": STATUS_USED if has_words else STATUS_NO_WORDS,
+                "tone": tone_status,
+                "face": face_status,
+            }
+            informative = {name: status == STATUS_USED for name, status in channel_status.items()}
 
             # 2. Math Engine: Cross-modal conflict & JSD calculation
             conflict_data = analyze_cross_modal_conflict(
-                p_v=p_video,
-                p_a=p_audio,
+                p_v=p_video_cmp,
+                p_a=p_audio_cmp,
                 p_s=p_semantic,
-                threshold=self.jsd_threshold
+                threshold=self.jsd_threshold,
+                informative=informative
             )
             jsd_score = float(conflict_data["tri_modal_jsd"])
             is_trigger = bool(conflict_data["is_trigger"])
 
             logger.info(
-                f"Utterance Processed | Words: '{transcript[:30]}...' | JSD: {jsd_score:.3f} | Trigger: {is_trigger}"
+                f"Utterance Processed | Words: '{transcript[:30]}...' | JSD: {jsd_score:.3f} | "
+                f"Trigger: {is_trigger} | Channels: {channel_status}"
             )
 
             # 3. Notify Telemetry Listeners on every VAD detection
@@ -243,24 +281,32 @@ class PipelineCoordinator:
                 except Exception as e:
                     logger.error(f"Error in telemetry callback: {e}")
 
+            if self.channel_status_cb is not None:
+                try:
+                    self.channel_status_cb(dict(channel_status))
+                except Exception as e:
+                    logger.error(f"Error in channel status callback: {e}")
+
             # Retrieve rolling conversation history (including user turns)
             dialogue_history = self.memory.get_formatted_history()
 
             # 4. Reasoner Synthesis on EVERY VAD Utterance Detection
             cue_data = self.reasoner.synthesize_cue(
                 transcript=transcript,
-                p_video=p_video,
-                p_audio=p_audio,
+                p_video=p_video_cmp,
+                p_audio=p_audio_cmp,
                 p_semantic=p_semantic,
                 jsd_score=jsd_score,
                 conflict_pair=conflict_data.get("max_conflict_pair"),
                 max_conflict_value=float(conflict_data.get("max_conflict_value", 0.0)),
                 is_trigger=is_trigger,
-                dialogue_history=dialogue_history
+                dialogue_history=dialogue_history,
+                channel_status=channel_status
             )
 
-            # Record this remote speaker turn into dialogue memory
-            top_tone, _ = get_top_emotion(p_audio)
+            # Record this remote speaker turn into dialogue memory. The tone label is kept only when
+            # it differed from their usual, so a naturally flat voice doesn't fill the history with "[neutral]".
+            top_tone = get_top_emotion(p_audio_cmp)[0] if tone_status == STATUS_USED else None
             self.memory.add_turn(
                 speaker="Other",
                 text=transcript,
@@ -282,6 +328,7 @@ class PipelineCoordinator:
                 "p_semantic": p_semantic,
                 "jsd_score": jsd_score,
                 "is_trigger": is_trigger,
+                "channel_status": channel_status,
                 "cue_data": cue_data
             }
 
@@ -308,9 +355,13 @@ if QT_AVAILABLE:
         cue_signal = QtCore.pyqtSignal(dict)
         speech_state_signal = QtCore.pyqtSignal(bool)
         status_signal = QtCore.pyqtSignal(str)
+        channel_status_signal = QtCore.pyqtSignal(dict)
 
         def emit_telemetry(self, p_v, p_a, p_s, jsd):
             self.telemetry_signal.emit(p_v, p_a, p_s, jsd)
+
+        def emit_channel_status(self, channel_status):
+            self.channel_status_signal.emit(channel_status)
 
         def emit_cue(self, cue_data):
             self.cue_signal.emit(cue_data)

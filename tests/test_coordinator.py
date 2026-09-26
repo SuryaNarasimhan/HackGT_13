@@ -71,6 +71,41 @@ class TestCoordinator(unittest.TestCase):
             print(f"Cue Type: {result['cue_data'].get('social_cue_type')}")
             print(f"Tip: {result['cue_data'].get('suggested_action')}")
 
+    def test_consistently_flat_voice_never_triggers(self):
+        """
+        A speaker whose voice is always flat is never flagged, during or after warm-up.
+        Before per-speaker baselines, joy words + flat voice + no face triggered a sarcasm cue.
+        """
+        joy = np.array([0.88, 0.04, 0.02, 0.02, 0.01, 0.01, 0.02])
+        self.coordinator.semantic_pipeline.process = (
+            lambda audio, sample_rate=16000: ("Thanks, this is really great work.", joy, 0.9)
+        )
+        statuses = []
+        self.coordinator.channel_status_cb = statuses.append
+
+        t = np.linspace(0, 2.0, 32000, endpoint=False)
+        flat_voice = (0.4 * np.sin(2 * np.pi * 135 * t)).astype(np.float32)
+        self.screen.push_frame(np.full((240, 320, 3), 150, dtype=np.uint8))  # No face on screen
+
+        for _ in range(7):
+            result = self.coordinator.process_utterance(flat_voice)
+            self.assertFalse(result["is_trigger"])
+
+        tone_statuses = [status["tone"] for status in statuses]
+        self.assertEqual(tone_statuses, ["warming_up"] * 5 + ["usual"] * 2)
+        self.assertEqual(result["channel_status"]["face"], "no_face")
+        self.assertEqual(result["cue_data"]["social_cue_type"], "In Sync / Authentic")
+
+    def test_stop_forgets_speaker_and_conversation(self):
+        """Stopping clears the learned speaker style and the conversation memory."""
+        self.coordinator.voice_baseline.compare_and_update(np.full(7, 1.0 / 7))
+        self.coordinator.memory.add_turn(speaker="Other", text="Hello there")
+
+        self.coordinator.stop()
+
+        self.assertEqual(len(self.coordinator.voice_baseline), 0)
+        self.assertEqual(len(self.coordinator.memory), 0)
+
     def test_lifecycle_start_stop(self):
         """Verifies start and stop lifecycle execution without thread hangs."""
         self.coordinator.start()

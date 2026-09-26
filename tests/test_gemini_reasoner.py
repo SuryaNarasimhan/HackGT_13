@@ -106,6 +106,90 @@ class TestGeminiReasoner(unittest.TestCase):
         self.assertTrue(any(w in result["explanation"].lower() for w in ["harmony", "align", "genuine", "authentic", "sync"]))
         self.assertEqual(result["transcript"], transcript)
 
+    # Canonical Emotion Order: ['joy', 'surprise', 'sadness', 'anger', 'disgust', 'fear', 'neutral']
+    JOY = np.array([0.88, 0.04, 0.02, 0.02, 0.01, 0.01, 0.02])
+    FLAT = np.array([0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.88])
+
+    def test_flatter_voice_alone_is_not_sarcasm(self):
+        """Sincere thanks with a flatter-than-usual voice and nothing ironic in the words stays ambiguous."""
+        result = self.reasoner.synthesize_cue(
+            transcript="Thanks, I really appreciate your help.",
+            p_video=self.FLAT,
+            p_audio=self.FLAT,
+            p_semantic=self.JOY,
+            jsd_score=0.77,
+            conflict_pair=("words", "tone"),
+            max_conflict_value=0.77,
+            is_trigger=True,
+            dialogue_history='- You (User): "I sent over the notes."',
+            channel_status={"words": "used", "tone": "used", "face": "no_face"}
+        )
+
+        self.assertEqual(result["social_cue_type"], "Ambiguous")
+        self.assertEqual(result["confidence"], "Low")
+        self.assertNotIn("None", result["explanation"])
+
+    def test_conversation_setback_supports_sarcasm(self):
+        """The same delivery reads as sarcasm when the conversation mentions a setback."""
+        result = self.reasoner.synthesize_cue(
+            transcript="Great, love that.",
+            p_video=self.FLAT,
+            p_audio=self.FLAT,
+            p_semantic=self.JOY,
+            jsd_score=0.77,
+            conflict_pair=("words", "tone"),
+            max_conflict_value=0.77,
+            is_trigger=True,
+            dialogue_history='- Other Person: "The build failed again right before the deadline."',
+            channel_status={"words": "used", "tone": "used", "face": "no_face"}
+        )
+
+        self.assertEqual(result["social_cue_type"], "Dry Sarcasm / Irony")
+        self.assertIn("setback", result["explanation"])
+
+    def test_face_value_explains_usual_delivery(self):
+        """When voice and face match this speaker's usual, the card says so instead of claiming harmony."""
+        result = self.reasoner.synthesize_cue(
+            transcript="Thanks. This is really great work.",
+            p_video=self.FLAT,
+            p_audio=self.FLAT,
+            p_semantic=self.JOY,
+            jsd_score=0.0,
+            is_trigger=False,
+            channel_status={"words": "used", "tone": "usual", "face": "usual"}
+        )
+
+        self.assertEqual(result["social_cue_type"], "In Sync / Authentic")
+        self.assertIn("usually come across", result["explanation"])
+        self.assertNotIn("harmony", result["explanation"])
+
+    def test_prompt_marks_unused_channels_and_does_not_presume_subtext(self):
+        """Channels that didn't count are named, and a mismatch alone is not treated as proof of subtext."""
+        prompt = self.reasoner._build_prompt(
+            transcript="Great, love that.",
+            p_video=self.FLAT,
+            p_audio=self.FLAT,
+            p_semantic=self.JOY,
+            jsd_score=0.77,
+            conflict_pair=("words", "tone"),
+            max_conflict_value=0.77,
+            is_trigger=True,
+            channel_status={"words": "used", "tone": "used", "face": "usual"}
+        )
+
+        self.assertIn("Facial Expression: not used (usual for them)", prompt)
+        self.assertIn("Vocal Tone / Prosody (what is stronger than their usual)", prompt)
+        self.assertIn("never enough on their own", prompt)
+        self.assertNotIn("indicates sarcasm", prompt)
+
+    def test_unknown_category_becomes_ambiguous(self):
+        """Categories outside the schema are not shown to the user."""
+        result = self.reasoner._validate_response(
+            {"social_cue_type": "Lying", "confidence": "High", "explanation": "x", "suggested_action": "y"},
+            "Hi"
+        )
+        self.assertEqual(result["social_cue_type"], "Ambiguous")
+
 
 if __name__ == "__main__":
     unittest.main()

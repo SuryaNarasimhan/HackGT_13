@@ -77,6 +77,7 @@ def main():
         # Connect bridge signals to UI components
         if hasattr(window, "telemetry"):
             bridge.telemetry_signal.connect(window.telemetry.update_telemetry)
+            bridge.channel_status_signal.connect(window.telemetry.update_channel_status)
         if hasattr(window, "cue_card"):
             bridge.cue_signal.connect(window.cue_card.display_cue)
         if hasattr(window, "set_status"):
@@ -92,13 +93,18 @@ def main():
             cue_callback=bridge.emit_cue,
             speech_state_callback=bridge.emit_speech_state,
             status_callback=bridge.emit_status,
-            jsd_threshold=args.threshold
+            jsd_threshold=args.threshold,
+            channel_status_callback=bridge.emit_channel_status
         )
     else:
         # Fallback callback binding
         def on_telemetry(p_v, p_a, p_s, jsd):
             if hasattr(window, "telemetry"):
                 window.telemetry.update_telemetry(p_v, p_a, p_s, jsd)
+
+        def on_channel_status(channel_status):
+            if hasattr(window, "telemetry"):
+                window.telemetry.update_channel_status(channel_status)
 
         def on_cue(cue_data):
             if hasattr(window, "cue_card"):
@@ -120,7 +126,8 @@ def main():
             cue_callback=on_cue,
             speech_state_callback=on_speech_state,
             status_callback=on_status,
-            jsd_threshold=args.threshold
+            jsd_threshold=args.threshold,
+            channel_status_callback=on_channel_status
         )
 
     # 4. Setup Demo Mode if --demo is passed
@@ -131,18 +138,22 @@ def main():
                 telemetry_callback=bridge.emit_telemetry,
                 cue_callback=bridge.emit_cue,
                 reasoner=coordinator.reasoner,
-                threshold=args.threshold
+                threshold=args.threshold,
+                channel_status_callback=bridge.emit_channel_status
             )
         else:
             demo_runner = MockDemoRunner(
                 telemetry_callback=on_telemetry,
                 cue_callback=on_cue,
                 reasoner=coordinator.reasoner,
-                threshold=args.threshold
+                threshold=args.threshold,
+                channel_status_callback=on_channel_status
             )
         if hasattr(window, "enable_demo_mode"):
             window.enable_demo_mode(demo_runner)
-        logger.info("Demo Mode ACTIVE. Hotkeys: [1] Sarcasm, [2] Sincere Praise, [3] Frustration")
+        logger.info(
+            "Demo Mode ACTIVE. Hotkeys: [1] Sarcasm, [2] Sincere Praise, [3] Frustration, [4] Flat Speaker Praise"
+        )
 
     # 5. Clean Shutdown Handler
     def shutdown_app(*_):

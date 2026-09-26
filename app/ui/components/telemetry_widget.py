@@ -8,6 +8,7 @@ import logging
 from typing import Dict, Optional, Tuple, Union
 import numpy as np
 
+from app.pipelines.speaker_baseline import STATUS_LABELS, STATUS_USED
 from app.pipelines.taxonomy import get_top_emotion
 from app.ui.qt_compat import QT_AVAILABLE, QtCore, QtWidgets, QtGui
 from app.ui.styles import (
@@ -81,7 +82,15 @@ if QT_AVAILABLE:
                 f"color: {COLOR_TEXT_PRIMARY}; font-size: 11px; font-weight: 700; font-family: 'Segoe UI', Inter;"
             )
 
+            # Why the channel didn't count this time (e.g. "usual for them"); hidden when it counted
+            self.note_label = QtWidgets.QLabel("", self)
+            self.note_label.setStyleSheet(
+                f"color: {COLOR_TEXT_MUTED}; font-size: 10px; font-style: italic; font-family: 'Segoe UI', Inter;"
+            )
+            self.note_label.hide()
+
             top_row.addWidget(self.name_label)
+            top_row.addWidget(self.note_label)
             top_row.addStretch()
             top_row.addWidget(self.emotion_label)
 
@@ -119,6 +128,15 @@ if QT_AVAILABLE:
             self.progress.setValue(pct)
             color = EMOTION_COLORS.get(top_emotion, COLOR_NEUTRAL)
             self.set_color(color)
+
+        def set_note(self, note: Optional[str]):
+            """Shows why the channel didn't count (e.g. 'usual for them'); None clears it."""
+            if note:
+                self.note_label.setText(f"· {note}")
+                self.note_label.show()
+            else:
+                self.note_label.clear()
+                self.note_label.hide()
 
 
     class IncongruenceGauge(QtWidgets.QWidget):
@@ -195,6 +213,7 @@ if QT_AVAILABLE:
         """
         # Qt Signals for safe cross-thread emission
         telemetry_updated = QtCore.pyqtSignal(object, object, object, float)
+        channel_status_updated = QtCore.pyqtSignal(dict)
 
         def __init__(self, parent=None):
             super().__init__(parent)
@@ -203,9 +222,11 @@ if QT_AVAILABLE:
             self.latest_audio = None
             self.latest_semantic = None
             self.latest_jsd = 0.0
+            self.latest_channel_status = {}
             self._init_ui()
-            # Connect internal signal to UI slot
+            # Connect internal signals to UI slots
             self.telemetry_updated.connect(self._on_telemetry_updated)
+            self.channel_status_updated.connect(self._on_channel_status_updated)
 
         def _init_ui(self):
             layout = QtWidgets.QVBoxLayout(self)
@@ -261,6 +282,18 @@ if QT_AVAILABLE:
             self.words_bar.update_distribution(p_semantic)
             self.gauge.update_jsd(jsd_score)
 
+        def update_channel_status(self, channel_status: Dict[str, str]):
+            """Thread-safe public entry point: marks channels that didn't count, and why."""
+            self.latest_channel_status = dict(channel_status)
+            self.channel_status_updated.emit(dict(channel_status))
+
+        @QtCore.pyqtSlot(dict)
+        def _on_channel_status_updated(self, channel_status: Dict[str, str]):
+            """UI Thread Slot."""
+            for name, bar in (("face", self.face_bar), ("tone", self.tone_bar), ("words", self.words_bar)):
+                status = channel_status.get(name)
+                bar.set_note(None if status in (None, STATUS_USED) else STATUS_LABELS.get(status, status))
+
 else:
     # -----------------------------------------------------------------------
     # Zero-Dependency Fallback Telemetry Widget (Tkinter / Headless)
@@ -273,6 +306,10 @@ else:
             self.latest_audio = None
             self.latest_semantic = None
             self.latest_jsd = 0.0
+            self.latest_channel_status = {}
+
+        def update_channel_status(self, channel_status: Dict[str, str]):
+            self.latest_channel_status = dict(channel_status)
 
         def update_telemetry(
             self,
