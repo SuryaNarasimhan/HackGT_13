@@ -1,0 +1,7 @@
+.DS_Store
+backend/.venv/
+backend/.env.local
+macos/SubtextOverlay/.build/
+__pycache__/
+*.py[cod]
+.pytest_cache/

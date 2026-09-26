@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Subtext</string>
+    <key>CFBundleDisplayName</key>
+    <string>Subtext</string>
+    <key>CFBundleIdentifier</key>
+    <string>org.subtext.overlay</string>
+    <key>CFBundleExecutable</key>
+    <string>SubtextOverlay</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>2</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Subtext transcribes your selected microphone locally during a conversation.</string>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>Subtext captures the selected call window locally to extract visual cues. Screen frames are not sent to Gemini.</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Subtext connects to its local transcription service on this Mac.</string>
+</dict>
+</plist>
