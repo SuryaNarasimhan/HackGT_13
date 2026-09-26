@@ -45,6 +45,7 @@ class VADDetector:
         self._current_utterance_chunks: List[np.ndarray] = []
         self._silence_frames_count = 0
         self._utterance_callbacks: List[Callable[[np.ndarray], None]] = []
+        self._speech_state_callbacks: List[Callable[[bool], None]] = []
 
         # Convert millisecond thresholds to chunk counts (assuming 512 samples per chunk ~ 32ms)
         self.samples_per_chunk = 512
@@ -76,6 +77,18 @@ class VADDetector:
         """Registers a callback receiving a complete utterance audio segment."""
         self._utterance_callbacks.append(cb)
 
+    def register_speech_state_callback(self, cb: Callable[[bool], None]):
+        """Registers a callback receiving boolean speech state (True=speaking, False=silent)."""
+        self._speech_state_callbacks.append(cb)
+
+    def _emit_speech_state(self, is_active: bool):
+        """Dispatches active speech state transitions to registered listeners."""
+        for cb in self._speech_state_callbacks:
+            try:
+                cb(is_active)
+            except Exception as e:
+                logger.error(f"Error in VAD speech state callback: {e}")
+
     def process_chunk(self, chunk: np.ndarray) -> bool:
         """
         Processes a single audio chunk (e.g. 512 samples at 16kHz).
@@ -89,6 +102,7 @@ class VADDetector:
                 # Speech onset
                 self.is_speech_active = True
                 self._current_utterance_chunks = []
+                self._emit_speech_state(True)
                 logger.debug("VAD: Speech onset detected.")
             self._current_utterance_chunks.append(chunk)
 
@@ -101,6 +115,7 @@ class VADDetector:
                 # Silence threshold reached -> Speech end
                 self.is_speech_active = False
                 self._silence_frames_count = 0
+                self._emit_speech_state(False)
 
                 # Check if speech was long enough to be meaningful
                 if len(self._current_utterance_chunks) >= self.min_speech_chunks:

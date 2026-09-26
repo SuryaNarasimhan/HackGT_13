@@ -42,6 +42,7 @@ class TestCueCard(unittest.TestCase):
 
     def test_badge_palette_coverage(self):
         """Verifies distinct badge colors exist for common social cues."""
+        self.assertIn("In Sync / Authentic", CUE_BADGE_COLORS)
         self.assertIn("Dry Sarcasm / Irony", CUE_BADGE_COLORS)
         self.assertIn("Concealed Frustration", CUE_BADGE_COLORS)
         self.assertIn("Playful Teasing", CUE_BADGE_COLORS)

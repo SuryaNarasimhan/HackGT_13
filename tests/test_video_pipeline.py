@@ -77,5 +77,37 @@ class TestVideoPipeline(unittest.TestCase):
         self.assertGreater(score, 0.70)
 
 
+    def test_non_face_desktop_rejection(self):
+        """High-variance desktop textures/text without faces must return detected=False."""
+        # Simulated IDE code/text (alternating dark background and bright characters, high variance)
+        desktop_frame = np.full((300, 400, 3), 30, dtype=np.uint8)
+        # Add high-contrast white/green code syntax lines
+        desktop_frame[20:25, 30:200] = [200, 200, 200]
+        desktop_frame[40:45, 50:180] = [80, 220, 100]
+        desktop_frame[60:65, 30:350] = [100, 150, 255]
+
+        detected, bbox = self.pipeline.detect_face(desktop_frame)
+        self.assertFalse(detected)
+        self.assertIsNone(bbox)
+
+        p_video, proc_detected, _ = self.pipeline.process_frame(desktop_frame)
+        self.assertFalse(proc_detected)
+        top_emotion, _ = get_top_emotion(p_video)
+        self.assertEqual(top_emotion, "neutral")
+
+    def test_rgb_bgr_color_handling(self):
+        """Verifies classify_face_crop handles RGB and BGR without crashing or channel confusion."""
+        face_crop = np.full((100, 100, 3), [210, 175, 140], dtype=np.uint8)
+        # RGB crop
+        dist_rgb = self.pipeline.classify_face_crop(face_crop, color_order="RGB")
+        self.assertEqual(dist_rgb.shape, (NUM_EMOTIONS,))
+        self.assertTrue(validate_distribution(dist_rgb))
+
+        # BGR crop
+        dist_bgr = self.pipeline.classify_face_crop(face_crop, color_order="BGR")
+        self.assertEqual(dist_bgr.shape, (NUM_EMOTIONS,))
+        self.assertTrue(validate_distribution(dist_bgr))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -19,6 +19,8 @@ from app.ui.styles import (
 logger = logging.getLogger(__name__)
 
 CUE_BADGE_COLORS: Dict[str, str] = {
+    "In Sync / Authentic": "#10B981",      # Emerald Green
+    "Sincere / In Sync": "#10B981",        # Emerald Green
     "Dry Sarcasm / Irony": "#C084FC",      # Purple
     "Playful Teasing": "#38BDF8",          # Cyan
     "Concealed Frustration": "#F87171",    # Soft Red
@@ -59,7 +61,7 @@ if QT_AVAILABLE:
         def _init_ui(self):
             layout = QtWidgets.QVBoxLayout(self)
             layout.setContentsMargins(12, 10, 12, 10)
-            layout.setSpacing(8)
+            layout.setSpacing(6)
 
             self.setStyleSheet(
                 f"""
@@ -119,7 +121,14 @@ if QT_AVAILABLE:
             top_row.addStretch()
             top_row.addWidget(self.dismiss_btn)
 
-            # 2. Explanation Text
+            # 2. Spoken Transcript Quote
+            self.transcript_label = QtWidgets.QLabel("", self)
+            self.transcript_label.setWordWrap(True)
+            self.transcript_label.setStyleSheet(
+                "color: #94A3B8; font-style: italic; font-size: 10.5px; font-family: 'Segoe UI', Inter; margin-bottom: 2px;"
+            )
+
+            # 3. Explanation Text
             self.explanation_label = QtWidgets.QLabel(
                 "Words express enthusiasm, but deadpan expression and flat monotone tone suggest sarcastic humor.",
                 self
@@ -134,7 +143,7 @@ if QT_AVAILABLE:
                 """
             )
 
-            # 3. Suggested Action Pill Box
+            # 4. Suggested Action Pill Box
             self.action_box = QtWidgets.QFrame(self)
             self.action_box.setStyleSheet(
                 """
@@ -160,6 +169,7 @@ if QT_AVAILABLE:
             action_layout.addWidget(self.action_label)
 
             layout.addLayout(top_row)
+            layout.addWidget(self.transcript_label)
             layout.addWidget(self.explanation_label)
             layout.addWidget(self.action_box)
 
@@ -169,15 +179,29 @@ if QT_AVAILABLE:
 
         @QtCore.pyqtSlot(dict)
         def _on_cue_received(self, cue_data: Dict[str, str]):
-            """UI Thread Slot: Updates texts and starts auto-dismiss timer."""
-            cue_type = cue_data.get("social_cue_type", "Social Cue")
+            """UI Thread Slot: Updates texts, dynamic themes, and starts auto-dismiss timer."""
+            cue_type = cue_data.get("social_cue_type", "In Sync / Authentic")
             confidence = cue_data.get("confidence", "Medium")
             explanation = cue_data.get("explanation", "")
             action = cue_data.get("suggested_action", "")
+            transcript = str(cue_data.get("transcript", "")).strip()
+
+            color = CUE_BADGE_COLORS.get(cue_type, "#10B981")
+            is_sync = ("in sync" in cue_type.lower() or "authentic" in cue_type.lower())
+
+            # Update container border glow
+            self.setStyleSheet(
+                f"""
+                QWidget#CueCardContainer {{
+                    background-color: {COLOR_BG_CARD};
+                    border: 1px solid {color}66;
+                    border-radius: 12px;
+                }}
+                """
+            )
 
             # Update badge
             self.badge_label.setText(cue_type.upper())
-            color = CUE_BADGE_COLORS.get(cue_type, "#C084FC")
             self.badge_label.setStyleSheet(
                 f"""
                 color: {color};
@@ -185,7 +209,7 @@ if QT_AVAILABLE:
                 font-size: 10px;
                 font-weight: 700;
                 letter-spacing: 0.5px;
-                background-color: rgba(192, 132, 252, 0.15);
+                background-color: {color}22;
                 border: 1px solid {color}55;
                 border-radius: 8px;
                 padding: 2px 8px;
@@ -193,8 +217,30 @@ if QT_AVAILABLE:
             )
 
             self.confidence_label.setText(f"{confidence} Confidence")
+
+            # Update transcript quote
+            if transcript and not transcript.startswith("[Speech detected"):
+                self.transcript_label.setText(f'"{transcript}"')
+                self.transcript_label.show()
+            else:
+                self.transcript_label.hide()
+
             self.explanation_label.setText(explanation)
-            self.action_label.setText(f"💡 Response Tip: {action}")
+
+            # Action Box
+            tip_prefix = "💡 Communication Note: " if is_sync else "💡 Response Tip: "
+            self.action_box.setStyleSheet(
+                f"""
+                QFrame {{
+                    background-color: {color}15;
+                    border-left: 3px solid {color};
+                    border-radius: 4px;
+                    padding: 6px;
+                }}
+                """
+            )
+            self.action_label.setText(f"{tip_prefix}{action}")
+            self.action_label.setStyleSheet(f"color: {color}; font-size: 10px; font-weight: 500;")
 
             # Show card and start auto-dismiss timer
             self.show()

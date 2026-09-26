@@ -25,6 +25,7 @@ SOCIAL_CUE_SCHEMA = {
         "social_cue_type": {
             "type": "string",
             "enum": [
+                "In Sync / Authentic",
                 "Dry Sarcasm / Irony",
                 "Playful Teasing",
                 "Concealed Frustration",
@@ -92,13 +93,18 @@ class GeminiReasoner:
         p_semantic: np.ndarray,
         jsd_score: float,
         conflict_pair: Optional[tuple] = None,
-        max_conflict_value: float = 0.0
+        max_conflict_value: float = 0.0,
+        is_trigger: Optional[bool] = None,
+        dialogue_history: Optional[str] = None
     ) -> Dict[str, str]:
         """
         Synthesizes multimodal cue information.
         Attempts live Gemini 2.5 Flash structured generation first,
         falling back seamlessly to rule-based heuristics if offline.
         """
+        if is_trigger is None:
+            is_trigger = bool(jsd_score >= 0.40 or max_conflict_value >= 0.65)
+
         if self.client:
             try:
                 return self._call_gemini(
@@ -108,7 +114,9 @@ class GeminiReasoner:
                     p_semantic=p_semantic,
                     jsd_score=jsd_score,
                     conflict_pair=conflict_pair,
-                    max_conflict_value=max_conflict_value
+                    max_conflict_value=max_conflict_value,
+                    is_trigger=is_trigger,
+                    dialogue_history=dialogue_history
                 )
             except Exception as e:
                 logger.warning(f"Gemini API call failed ({e}). Reverting to fallback reasoner.")
@@ -121,7 +129,9 @@ class GeminiReasoner:
             p_semantic=p_semantic,
             jsd_score=jsd_score,
             conflict_pair=conflict_pair,
-            max_conflict_value=max_conflict_value
+            max_conflict_value=max_conflict_value,
+            is_trigger=is_trigger,
+            dialogue_history=dialogue_history
         )
 
     def _build_prompt(
@@ -132,9 +142,11 @@ class GeminiReasoner:
         p_semantic: np.ndarray,
         jsd_score: float,
         conflict_pair: Optional[tuple],
-        max_conflict_value: float
+        max_conflict_value: float,
+        is_trigger: bool,
+        dialogue_history: Optional[str] = None
     ) -> str:
-        """Constructs an empathetic, context-rich prompt for Gemini."""
+        """Constructs an empathetic, context-rich prompt for Gemini with multi-turn dialogue history."""
         top_face, face_prob = get_top_emotion(p_video)
         top_tone, tone_prob = get_top_emotion(p_audio)
         top_words, words_prob = get_top_emotion(p_semantic)
@@ -146,11 +158,41 @@ class GeminiReasoner:
                 f"(Pairwise Divergence: {max_conflict_value:.2f})"
             )
 
+        history_section = ""
+        if dialogue_history and dialogue_history.strip() and not dialogue_history.startswith("(No previous"):
+            history_section = f"""
+RECENT CONVERSATION HISTORY (Context from both parties):
+{dialogue_history.strip()}
+""".strip()
+
+        if not is_trigger or jsd_score < 0.35:
+            context_header = (
+                "Spoken words, vocal prosody, and facial expression are in HARMONY. "
+                "No significant cross-modal mismatch or subtext detected."
+            )
+            task_rules = """
+- Categorize as 'In Sync / Authentic' or 'Polite Agreement'.
+- Confirm why the channels align in the context of the conversation.
+- Provide a brief, supportive tip confirming the user can take the statement at face value.
+""".strip()
+        else:
+            context_header = (
+                "A cross-modal incongruence was detected between what was said, how it was said, and facial expression."
+            )
+            task_rules = """
+- Consider the conversational context (what the user or other person said before) to interpret the subtext accurately.
+- Focus on why the contrast between channels indicates sarcasm, teasing, concealed frustration, or polite masking.
+- Avoid judgmental or pathologizing language. Present interpretations as supportive possibilities.
+- Provide a brief, practical tip for how the user can comfortably respond or navigate this moment.
+""".strip()
+
+        history_block = f"\n{history_section}\n" if history_section else ""
+
         return f"""
 You are SocialLens, an empathetic assistive communication assistant designed to support neurodivergent individuals during video calls.
-A cross-modal incongruence was detected between what was said, how it was said, and facial expression.
-
-CONVERSATION DATA:
+{context_header}
+{history_block}
+CURRENT UTTERANCE UNDER ANALYSIS:
 - Spoken Words: "{transcript}"
 - Semantic Sentiment: Top='{top_words}' ({words_prob:.0%}) | Full={vector_to_dict(p_semantic)}
 - Vocal Tone / Prosody: Top='{top_tone}' ({tone_prob:.0%}) | Full={vector_to_dict(p_audio)}
@@ -159,10 +201,8 @@ CONVERSATION DATA:
 {conflict_desc}
 
 TASK:
-Interpret the likely social subtext.
-- Focus on why the contrast between channels indicates sarcasm, teasing, concealed frustration, or polite masking.
-- Avoid judgmental or pathologizing language. Present interpretations as supportive possibilities.
-- Provide a brief, practical tip for how the user can comfortably respond or navigate this moment.
+Interpret the social context for the user:
+{task_rules}
 - You must output valid JSON matching the required schema.
 """.strip()
 
@@ -174,7 +214,9 @@ Interpret the likely social subtext.
         p_semantic: np.ndarray,
         jsd_score: float,
         conflict_pair: Optional[tuple],
-        max_conflict_value: float
+        max_conflict_value: float,
+        is_trigger: bool,
+        dialogue_history: Optional[str] = None
     ) -> Dict[str, str]:
         """Calls Gemini with structured JSON output configuration."""
         from google.genai import types
@@ -186,16 +228,19 @@ Interpret the likely social subtext.
             p_semantic=p_semantic,
             jsd_score=jsd_score,
             conflict_pair=conflict_pair,
-            max_conflict_value=max_conflict_value
+            max_conflict_value=max_conflict_value,
+            is_trigger=is_trigger,
+            dialogue_history=dialogue_history
         )
 
         config = types.GenerateContentConfig(
             temperature=0.2,
             response_mime_type="application/json",
             response_schema=SOCIAL_CUE_SCHEMA,
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
             system_instruction=(
                 "You are an empathetic social communication assistant for neurodivergent individuals. "
-                "Output concise, highly supportive JSON explaining non-verbal social cues."
+                "Output concise, highly supportive JSON explaining non-verbal social cues with conversational context."
             )
         )
 
@@ -205,9 +250,17 @@ Interpret the likely social subtext.
             config=config
         )
 
-        raw_text = response.text.strip()
+        raw_text = response.text.strip() if response.text else ""
+        if raw_text.startswith("```"):
+            lines = raw_text.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].startswith("```"):
+                lines = lines[:-1]
+            raw_text = "\n".join(lines).strip()
+
         data = json.loads(raw_text)
-        return self._validate_response(data)
+        return self._validate_response(data, transcript)
 
     def _fallback_heuristic_reasoner(
         self,
@@ -217,15 +270,30 @@ Interpret the likely social subtext.
         p_semantic: np.ndarray,
         jsd_score: float,
         conflict_pair: Optional[tuple],
-        max_conflict_value: float
+        max_conflict_value: float,
+        is_trigger: bool = True,
+        dialogue_history: Optional[str] = None
     ) -> Dict[str, str]:
         """
         Rule-based heuristic reasoner that mirrors Gemini's output schema when offline.
-        Uses affective incongruence rules (Mehrabian principle).
+        Uses affective incongruence rules (Mehrabian principle) and handles in-sync communication.
         """
         top_face, _ = get_top_emotion(p_video)
         top_tone, _ = get_top_emotion(p_audio)
         top_words, _ = get_top_emotion(p_semantic)
+
+        # Baseline: In-Sync / Congruent communication
+        if not is_trigger or jsd_score < 0.35:
+            return {
+                "social_cue_type": "In Sync / Authentic",
+                "confidence": "High",
+                "explanation": (
+                    f"Spoken words, vocal tone ({top_tone}), and facial expression ({top_face}) are aligned in harmony. "
+                    "No conflicting subtext detected; communication is direct and genuine."
+                ),
+                "suggested_action": "Take the message at face value and engage naturally with confidence.",
+                "transcript": transcript
+            }
 
         # Rule 1: Words express Joy/Praise, but Tone/Face are Neutral or Negative -> Sarcasm/Irony
         if top_words in ["joy", "surprise"] and (top_tone in ["neutral", "disgust", "anger"] or top_face in ["neutral", "disgust"]):
@@ -236,7 +304,8 @@ Interpret the likely social subtext.
                     f"Spoken words express {top_words}, but vocal tone is {top_tone} and expression is {top_face}. "
                     "This contrast often signals dry sarcasm, irony, or self-deprecating humor."
                 ),
-                "suggested_action": "Acknowledge the underlying irony or setback lightly rather than taking the literal praise at face value."
+                "suggested_action": "Acknowledge the underlying irony or setback lightly rather than taking the literal praise at face value.",
+                "transcript": transcript
             }
 
         # Rule 2: Words are Polite/Neutral, but Tone or Face indicates Anger/Frustration -> Concealed Frustration
@@ -248,7 +317,8 @@ Interpret the likely social subtext.
                     f"While the words seem {top_words}, subtle vocal tension ({top_tone}) and facial cues ({top_face}) "
                     "suggest mild frustration or unspoken stress."
                 ),
-                "suggested_action": "Offer reassurance or gently invite them to share if they have concerns ('Is everything looking alright on your end?')."
+                "suggested_action": "Offer reassurance or gently invite them to share if they have concerns ('Is everything looking alright on your end?').",
+                "transcript": transcript
             }
 
         # Rule 3: Words indicate Negative/Fear, but Tone or Face is Joyful -> Playful Teasing / Banter
@@ -260,7 +330,8 @@ Interpret the likely social subtext.
                     f"The speaker used words denoting {top_words}, but their smiling expression ({top_face}) "
                     f"and upbeat tone ({top_tone}) indicate playful banter rather than genuine hostility."
                 ),
-                "suggested_action": "Respond in a friendly, lighthearted tone; they are likely engaging in friendly teasing."
+                "suggested_action": "Respond in a friendly, lighthearted tone; they are likely engaging in friendly teasing.",
+                "transcript": transcript
             }
 
         # Rule 4: General High Divergence
@@ -271,14 +342,16 @@ Interpret the likely social subtext.
                 f"There is a notable difference between their words ({top_words}), tone ({top_tone}), "
                 f"and facial expression ({top_face}), which may indicate understated humor or mixed feelings."
             ),
-            "suggested_action": "Give a brief pause or check in with a clarifying question to confirm their intent."
+            "suggested_action": "Give a brief pause or check in with a clarifying question to confirm their intent.",
+            "transcript": transcript
         }
 
-    def _validate_response(self, data: Dict[str, Any]) -> Dict[str, str]:
+    def _validate_response(self, data: Dict[str, Any], transcript: str = "") -> Dict[str, str]:
         """Ensures all required keys are present and clean strings."""
         return {
-            "social_cue_type": str(data.get("social_cue_type", "Ambiguous")),
+            "social_cue_type": str(data.get("social_cue_type", "In Sync / Authentic")),
             "confidence": str(data.get("confidence", "Medium")),
-            "explanation": str(data.get("explanation", "Subtle social cue detected.")),
-            "suggested_action": str(data.get("suggested_action", "Proceed naturally."))
+            "explanation": str(data.get("explanation", "Spoken words, tone, and expression were analyzed.")),
+            "suggested_action": str(data.get("suggested_action", "Proceed naturally.")),
+            "transcript": transcript or str(data.get("transcript", ""))
         }

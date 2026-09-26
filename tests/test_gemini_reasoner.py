@@ -80,7 +80,31 @@ class TestGeminiReasoner(unittest.TestCase):
         )
 
         self.assertEqual(result["social_cue_type"], "Concealed Frustration")
-        self.assertIn("frustration", result["explanation"].lower())
+        self.assertTrue(any(w in result["explanation"].lower() for w in ["frustrat", "upset", "tension", "stress"]))
+
+    def test_in_sync_authentic_scenario(self):
+        """Simulates congruent communication where words, tone, and face align in harmony."""
+        transcript = "Thank you so much for helping me out today!"
+
+        p_semantic = np.array([0.88, 0.04, 0.02, 0.02, 0.01, 0.01, 0.02])  # Joy
+        p_audio = np.array([0.82, 0.05, 0.03, 0.03, 0.02, 0.02, 0.03])     # Joy
+        p_video = np.array([0.91, 0.03, 0.02, 0.01, 0.01, 0.01, 0.01])     # Joy / Smile
+
+        result = self.reasoner.synthesize_cue(
+            transcript=transcript,
+            p_video=p_video,
+            p_audio=p_audio,
+            p_semantic=p_semantic,
+            jsd_score=0.08,
+            conflict_pair=("words", "tone"),
+            max_conflict_value=0.06,
+            is_trigger=False
+        )
+
+        self.assertEqual(result["social_cue_type"], "In Sync / Authentic")
+        self.assertEqual(result["confidence"], "High")
+        self.assertTrue(any(w in result["explanation"].lower() for w in ["harmony", "align", "genuine", "authentic", "sync"]))
+        self.assertEqual(result["transcript"], transcript)
 
 
 if __name__ == "__main__":

@@ -70,5 +70,23 @@ class TestScreenCapture(unittest.TestCase):
         print(f"\nSaved test screenshot to: {actual_path} ({os.path.getsize(actual_path)} bytes)")
 
 
+    def test_auto_track_toggle(self):
+        """Verifies auto-track mode enabling and disabling."""
+        self.manager.enable_auto_track(True)
+        self.assertTrue(self.manager.auto_track)
+        self.assertFalse(self.manager._manual_roi)
+
+        self.manager.set_roi(10, 10, 200, 200, is_manual=True)
+        self.assertTrue(self.manager._manual_roi)
+
+        self.manager.enable_auto_track(False)
+        self.assertFalse(self.manager.auto_track)
+
+    def test_snap_to_window_graceful_handling(self):
+        """snap_to_window must execute gracefully without crashing."""
+        result = self.manager.snap_to_window(title_query="NonExistentDummyWindow12345")
+        self.assertFalse(result)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2,17 +2,17 @@
 Audio Prosody & Acoustic Tone Perception Pipeline for SocialLens
 Ingests 16kHz mono audio waveform segments, analyzes acoustic prosody
 (pitch variance, energy contour, harmonic stability), and classifies vocal tone
-into the canonical 7-emotion discrete simplex.
+into the canonical 7-emotion discrete simplex using a deep Speech Emotion Recognition (SER) model.
 """
 
 import logging
 from typing import Dict, Optional, Tuple, Union
 import numpy as np
-from scipy import signal
 
 from app.config import AUDIO_SAMPLE_RATE, AUDIO_EMOTION_MODEL
 from app.pipelines.taxonomy import (
     CANONICAL_EMOTIONS,
+    EMOTION_TO_IDX,
     NUM_EMOTIONS,
     dict_to_vector,
     normalize_distribution,
@@ -22,12 +22,37 @@ from app.pipelines.taxonomy import (
 
 logger = logging.getLogger(__name__)
 
+# Mapping from common SER model label names to the canonical 7-emotion simplex
+SER_LABEL_TO_CANONICAL: Dict[str, str] = {
+    "happy": "joy",
+    "happiness": "joy",
+    "joy": "joy",
+    "hap": "joy",
+    "sad": "sadness",
+    "sadness": "sadness",
+    "angry": "anger",
+    "anger": "anger",
+    "ang": "anger",
+    "fearful": "fear",
+    "fear": "fear",
+    "fea": "fear",
+    "disgust": "disgust",
+    "disgusted": "disgust",
+    "dis": "disgust",
+    "surprised": "surprise",
+    "surprise": "surprise",
+    "sur": "surprise",
+    "neutral": "neutral",
+    "neu": "neutral",
+    "calm": "neutral",
+}
+
 
 class AudioPipeline:
     """
     Acoustic Tone & Prosody Pipeline.
-    Combines digital signal processing (DSP) prosodic feature extraction
-    with an optional deep audio emotion model (HuBERT / Wav2Vec2).
+    Combines deep Speech Emotion Recognition (DistilHuBERT / Wav2Vec2) with
+    digital signal processing (DSP) prosodic feature extraction.
     """
 
     def __init__(
@@ -53,7 +78,8 @@ class AudioPipeline:
             self._hf_pipeline = pipeline(
                 "audio-classification",
                 model=self.model_name,
-                device=-1  # CPU
+                top_k=None,
+                device=-1  # CPU for predictable real-time latency
             )
             logger.info("Audio classification model loaded successfully.")
         except Exception as e:
@@ -140,10 +166,11 @@ class AudioPipeline:
             "zcr": zcr
         }
 
-    def classify_prosody(self, audio: np.ndarray) -> np.ndarray:
+    def classify_speech_emotion(self, audio: np.ndarray) -> np.ndarray:
         """
         Classifies speech waveform into a canonical 7-D emotion distribution:
         ['joy', 'surprise', 'sadness', 'anger', 'disgust', 'fear', 'neutral']
+        Uses pre-trained SER deep learning model with fallbacks.
         """
         if len(audio) == 0:
             neutral_vec = np.zeros(NUM_EMOTIONS, dtype=np.float64)
@@ -154,22 +181,38 @@ class AudioPipeline:
 
         if self._hf_pipeline is not None:
             try:
-                # HF pipeline classification
-                outputs = self._hf_pipeline(audio)
+                # Ensure float32 1D audio normalized in [-1.0, 1.0]
+                audio_f32 = audio.astype(np.float32)
+                max_abs = float(np.max(np.abs(audio_f32)))
+                if max_abs > 1.0:
+                    audio_f32 = audio_f32 / 32768.0
+
+                outputs = self._hf_pipeline(audio_f32)
                 if outputs and isinstance(outputs, list):
-                    raw_dict = {item["label"].lower(): float(item["score"]) for item in outputs}
-                    return dict_to_vector(raw_dict)
+                    vec = np.zeros(NUM_EMOTIONS, dtype=np.float64)
+                    for item in outputs:
+                        raw_label = str(item.get("label", "")).strip().lower()
+                        score = float(item.get("score", 0.0))
+                        canonical = SER_LABEL_TO_CANONICAL.get(raw_label)
+                        if canonical and canonical in EMOTION_TO_IDX:
+                            vec[EMOTION_TO_IDX[canonical]] += score
+
+                    if np.sum(vec) > 1e-6:
+                        return normalize_distribution(vec)
             except Exception as e:
                 logger.warning(f"HF Audio inference failed ({e}). Using DSP prosody extractor.")
 
-        # DSP Prosody-based Emotion Classification
+        # DSP Prosody-based Emotion Classification Fallback
         features = self.extract_prosody_features(audio)
         return self._prosody_features_to_simplex(features)
 
+    def classify_prosody(self, audio: np.ndarray) -> np.ndarray:
+        """Alias for classify_speech_emotion for backward compatibility."""
+        return self.classify_speech_emotion(audio)
+
     def _prosody_features_to_simplex(self, f: Dict[str, float]) -> np.ndarray:
         """
-        Maps acoustic prosodic features (pitch std, energy, ZCR)
-        into the canonical 7-emotion simplex via evidence-based acoustic correlates.
+        Fallback heuristic mapping acoustic prosodic features into the canonical 7-simplex.
         """
         logits = np.zeros(NUM_EMOTIONS, dtype=np.float64)
         
@@ -190,24 +233,17 @@ class AudioPipeline:
         if is_monotone:
             logits[idx_neutral] += 3.5
             logits[idx_sadness] += 0.5
-
-        # 2. High Pitch Variance + Expressive Energy -> Joy & Surprise
-        if pitch_std > 35.0 and rms > 0.08:
-            logits[idx_joy] += 2.8
-            logits[idx_surprise] += 2.2
-        elif pitch_std > 22.0:
-            logits[idx_joy] += 1.2
-            logits[idx_surprise] += 1.0
-
-        # 3. High Energy + Harsh Spectral Turbulence (ZCR) -> Anger / Frustration
-        if rms > 0.20 and zcr > 0.12:
+        # 2. High Energy + Harsh Spectral Turbulence -> Anger
+        elif rms > 0.20 and zcr > 0.12:
             logits[idx_anger] += 2.5
             logits[idx_disgust] += 1.0
-
-        # 4. Low Energy + Low Pitch -> Sadness
-        if rms < 0.05 and pitch_std < 20.0:
-            logits[idx_sadness] += 2.0
-            logits[idx_neutral] += 1.5
+        # 3. Dynamic Pitch Variance with Moderate Energy
+        elif pitch_std > 25.0:
+            logits[idx_surprise] += 1.5
+            logits[idx_joy] += 1.2
+            logits[idx_sadness] += 1.0
+        else:
+            logits[idx_neutral] += 2.0
 
         # Baseline prior so no probability is absolute zero
         logits += 0.2
@@ -218,5 +254,5 @@ class AudioPipeline:
         Processes audio waveform and returns (p_audio_vector, prosody_features).
         """
         features = self.extract_prosody_features(audio)
-        p_audio = self._prosody_features_to_simplex(features)
+        p_audio = self.classify_speech_emotion(audio)
         return p_audio, features

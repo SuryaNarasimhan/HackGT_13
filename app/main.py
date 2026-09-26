@@ -68,6 +68,7 @@ def main():
     audio_capture = AudioLoopbackCapture()
     screen_capture = ScreenCaptureManager()
     vad_detector = VADDetector()
+    window.screen_capture = screen_capture
 
 
     # 3. Setup Coordinator Bridge
@@ -78,6 +79,10 @@ def main():
             bridge.telemetry_signal.connect(window.telemetry.update_telemetry)
         if hasattr(window, "cue_card"):
             bridge.cue_signal.connect(window.cue_card.display_cue)
+        if hasattr(window, "set_status"):
+            bridge.status_signal.connect(window.set_status)
+        if hasattr(window, "set_speech_active"):
+            bridge.speech_state_signal.connect(window.set_speech_active)
 
         coordinator = PipelineCoordinator(
             audio_capture=audio_capture,
@@ -85,6 +90,8 @@ def main():
             vad_detector=vad_detector,
             telemetry_callback=bridge.emit_telemetry,
             cue_callback=bridge.emit_cue,
+            speech_state_callback=bridge.emit_speech_state,
+            status_callback=bridge.emit_status,
             jsd_threshold=args.threshold
         )
     else:
@@ -97,12 +104,22 @@ def main():
             if hasattr(window, "cue_card"):
                 window.cue_card.display_cue(cue_data)
 
+        def on_speech_state(is_speaking):
+            if hasattr(window, "set_speech_active"):
+                window.set_speech_active(is_speaking)
+
+        def on_status(status):
+            if hasattr(window, "set_status"):
+                window.set_status(status)
+
         coordinator = PipelineCoordinator(
             audio_capture=audio_capture,
             screen_capture=screen_capture,
             vad_detector=vad_detector,
             telemetry_callback=on_telemetry,
             cue_callback=on_cue,
+            speech_state_callback=on_speech_state,
+            status_callback=on_status,
             jsd_threshold=args.threshold
         )
 
@@ -161,11 +178,14 @@ def main():
         interrupt_timer.timeout.connect(lambda: None)
         interrupt_timer.start(200)
 
-    # 6. Start Perception Coordinator
-    coordinator.start()
-    window.show()
+    # 6. Start Perception Coordinator (live mode only; demo mode uses deterministic triggers)
+    if not args.demo:
+        coordinator.start()
+        logger.info("SocialLens HUD is active. Pinned Always-On-Top.")
+    else:
+        logger.info("SocialLens HUD active in Demo Mode (Background capture inactive).")
 
-    logger.info("SocialLens HUD is active. Pinned Always-On-Top.")
+    window.show()
 
     # 7. Event Loop Execution
     if QT_AVAILABLE and app is not None:

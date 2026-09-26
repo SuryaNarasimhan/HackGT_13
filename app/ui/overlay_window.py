@@ -29,7 +29,7 @@ if QT_AVAILABLE:
             self.window_height = height
             self._drag_pos: Optional[QtCore.QPoint] = None
             self._is_collapsed = False
-
+            self.demo_runner = None
 
             self._init_window_flags()
             self._init_ui()
@@ -103,8 +103,33 @@ if QT_AVAILABLE:
             self.cue_card = SubtextInsightCard(self.central_container)
             self.main_layout.addWidget(self.cue_card)
 
-            # Manual test preview button (useful for hackathon demo preparation)
-            self.test_preview_btn = QtWidgets.QPushButton("⚡ Preview Sarcasm Cue", self.central_container)
+            # Quick action buttons row: Auto-Lock Video Tile & Preview Cue
+            action_btn_box = QtWidgets.QWidget(self.central_container)
+            action_layout = QtWidgets.QHBoxLayout(action_btn_box)
+            action_layout.setContentsMargins(0, 0, 0, 0)
+            action_layout.setSpacing(6)
+
+            self.lock_video_btn = QtWidgets.QPushButton("🎯 Auto-Lock Video", action_btn_box)
+            self.lock_video_btn.setToolTip("Auto-detect video call window or speaker face")
+            self.lock_video_btn.setStyleSheet(
+                """
+                QPushButton {
+                    background-color: rgba(56, 189, 248, 0.12);
+                    color: #38BDF8;
+                    border: 1px solid rgba(56, 189, 248, 0.3);
+                    border-radius: 8px;
+                    font-size: 10px;
+                    padding: 5px 8px;
+                }
+                QPushButton:hover {
+                    background-color: rgba(56, 189, 248, 0.25);
+                    color: #FFFFFF;
+                }
+                """
+            )
+            self.lock_video_btn.clicked.connect(self._trigger_auto_lock_video)
+
+            self.test_preview_btn = QtWidgets.QPushButton("⚡ Preview Cue", action_btn_box)
             self.test_preview_btn.setStyleSheet(
                 """
                 QPushButton {
@@ -113,7 +138,7 @@ if QT_AVAILABLE:
                     border: 1px dashed rgba(255, 255, 255, 0.15);
                     border-radius: 8px;
                     font-size: 10px;
-                    padding: 4px;
+                    padding: 5px 8px;
                 }
                 QPushButton:hover {
                     background-color: rgba(168, 85, 247, 0.2);
@@ -122,7 +147,27 @@ if QT_AVAILABLE:
                 """
             )
             self.test_preview_btn.clicked.connect(self._trigger_test_cue)
-            self.main_layout.addWidget(self.test_preview_btn)
+
+            action_layout.addWidget(self.lock_video_btn)
+            action_layout.addWidget(self.test_preview_btn)
+            self.main_layout.addWidget(action_btn_box)
+
+        def _trigger_auto_lock_video(self):
+            """Triggers dynamic auto-face discovery or window snapping."""
+            screen_capture = getattr(self, "screen_capture", None)
+            if screen_capture is not None:
+                # Try snapping to active video meeting window first, then full-screen face scan
+                snapped = screen_capture.snap_to_window()
+                if not snapped:
+                    snapped = screen_capture.find_and_lock_face()
+
+                if snapped:
+                    roi = screen_capture.get_roi()
+                    self.set_status(f"Locked ({roi['width']}x{roi['height']})")
+                else:
+                    self.set_status("Scanning screen...")
+            else:
+                self.set_status("Locked (Auto)")
 
         def _trigger_test_cue(self):
             """Manual trigger for demo and testing preview."""
@@ -133,9 +178,6 @@ if QT_AVAILABLE:
                 "suggested_action": "Acknowledge the shared irony lightly rather than taking the literal praise at face value."
             }
             self.cue_card.display_cue(sample_cue)
-
-
-            self.demo_runner = None
 
         def enable_demo_mode(self, demo_runner):
             """Enables demo mode HUD controls and hotkeys."""
@@ -153,15 +195,15 @@ if QT_AVAILABLE:
 
             btn_sarcasm = QtWidgets.QPushButton("[1] Sarcasm", demo_box)
             btn_sarcasm.setStyleSheet("font-size: 9px; padding: 3px 6px; background-color: rgba(192, 132, 252, 0.2); color: #C084FC; border-radius: 6px;")
-            btn_sarcasm.clicked.connect(lambda: self.demo_runner.trigger_scenario(1))
+            btn_sarcasm.clicked.connect(lambda: self.trigger_demo_scenario(1))
 
             btn_praise = QtWidgets.QPushButton("[2] Praise", demo_box)
             btn_praise.setStyleSheet("font-size: 9px; padding: 3px 6px; background-color: rgba(16, 185, 129, 0.2); color: #34D399; border-radius: 6px;")
-            btn_praise.clicked.connect(lambda: self.demo_runner.trigger_scenario(2))
+            btn_praise.clicked.connect(lambda: self.trigger_demo_scenario(2))
 
             btn_stress = QtWidgets.QPushButton("[3] Frustration", demo_box)
             btn_stress.setStyleSheet("font-size: 9px; padding: 3px 6px; background-color: rgba(248, 113, 113, 0.2); color: #F87171; border-radius: 6px;")
-            btn_stress.clicked.connect(lambda: self.demo_runner.trigger_scenario(3))
+            btn_stress.clicked.connect(lambda: self.trigger_demo_scenario(3))
 
             demo_layout.addWidget(btn_sarcasm)
             demo_layout.addWidget(btn_praise)
@@ -169,23 +211,81 @@ if QT_AVAILABLE:
 
             self.main_layout.addWidget(demo_box)
 
+        def trigger_demo_scenario(self, scenario_id: int):
+            """Executes a demo scenario asynchronously without freezing the Qt main thread."""
+            if getattr(self, "_demo_in_progress", False):
+                logger.info(f"Scenario analysis currently running. Ignoring click for scenario {scenario_id}.")
+                return
+            self._demo_in_progress = True
+
+            scenario_names = {1: "Sarcasm", 2: "Praise", 3: "Frustration"}
+            name = scenario_names.get(scenario_id, str(scenario_id))
+            self.status_pill.setText(f"● Analyzing [{name}]...")
+            self.status_pill.setStyleSheet(
+                "color: #38BDF8; background-color: rgba(56, 189, 248, 0.15); border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 10px; padding: 2px 8px;"
+            )
+
+            import threading
+            def _worker():
+                try:
+                    self.demo_runner.trigger_scenario(scenario_id)
+                except Exception as e:
+                    logger.error(f"Error executing demo scenario {scenario_id}: {e}", exc_info=True)
+                finally:
+                    self._demo_in_progress = False
+                    QtCore.QTimer.singleShot(0, self._restore_demo_pill)
+
+            threading.Thread(target=_worker, daemon=True).start()
+
+        def _restore_demo_pill(self):
+            """Restores demo status pill label."""
+            if getattr(self, "demo_runner", None) is not None:
+                self.status_pill.setText("● Demo Mode (Press 1, 2, 3)")
+                self.status_pill.setStyleSheet(
+                    "color: #FBBF24; background-color: rgba(245, 158, 11, 0.15); border: 1px solid rgba(245, 158, 11, 0.3); border-radius: 10px; padding: 2px 8px;"
+                )
+
         def keyPressEvent(self, event):
             """Hotkey triggers (keys 1, 2, 3) for live judging presentations."""
-            if self.demo_runner is not None:
+            if getattr(self, "demo_runner", None) is not None:
                 key = event.key()
                 if key == QtCore.Qt.Key.Key_1:
-                    self.demo_runner.trigger_scenario(1)
+                    self.trigger_demo_scenario(1)
                     event.accept()
                     return
                 elif key == QtCore.Qt.Key.Key_2:
-                    self.demo_runner.trigger_scenario(2)
+                    self.trigger_demo_scenario(2)
                     event.accept()
                     return
                 elif key == QtCore.Qt.Key.Key_3:
-                    self.demo_runner.trigger_scenario(3)
+                    self.trigger_demo_scenario(3)
                     event.accept()
                     return
             super().keyPressEvent(event)
+
+        def set_status(self, status: str):
+            """Updates HUD status indicator pill."""
+            if getattr(self, "demo_runner", None) is not None:
+                return  # Preserve demo instructions
+            if status == "Speaking":
+                self.status_pill.setText("● Speaking...")
+                self.status_pill.setStyleSheet(
+                    "color: #38BDF8; background-color: rgba(56, 189, 248, 0.15); border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 10px; padding: 2px 8px;"
+                )
+            elif status == "Analyzing":
+                self.status_pill.setText("● Analyzing...")
+                self.status_pill.setStyleSheet(
+                    "color: #FBBF24; background-color: rgba(245, 158, 11, 0.15); border: 1px solid rgba(245, 158, 11, 0.3); border-radius: 10px; padding: 2px 8px;"
+                )
+            else:
+                self.status_pill.setText("● Listening")
+                self.status_pill.setStyleSheet(
+                    "color: #34D399; background-color: rgba(16, 185, 129, 0.15); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 10px; padding: 2px 8px;"
+                )
+
+        def set_speech_active(self, is_speaking: bool):
+            """Slot for speech state toggles."""
+            self.set_status("Speaking" if is_speaking else "Listening")
 
         def toggle_collapse(self):
             """Toggles between full HUD card and minimized pill bar."""
@@ -242,6 +342,7 @@ else:
             self._drag_x = 0
             self._drag_y = 0
             self._is_collapsed = False
+            self.demo_runner = None
 
             self.root = tk.Tk()
             self._init_window()
@@ -314,6 +415,15 @@ else:
             x = self.root.winfo_x() + (event.x - self._drag_x)
             y = self.root.winfo_y() + (event.y - self._drag_y)
             self.root.geometry(f"+{x}+{y}")
+
+        def set_status(self, status: str):
+            if getattr(self, "demo_runner", None) is not None:
+                return
+            if hasattr(self, "status_pill"):
+                self.status_pill.config(text=f"● {status}")
+
+        def set_speech_active(self, is_speaking: bool):
+            self.set_status("Speaking" if is_speaking else "Listening")
 
         def show(self):
             self.root.update()

@@ -40,15 +40,17 @@ class TestMockDemo(unittest.TestCase):
         print(f"Tip: {res['cue_data']['suggested_action']}")
 
     def test_scenario_2_sincere_praise(self):
-        """Scenario 2: Low divergence -> Congruent In-Sync, No Cue Popup."""
+        """Scenario 2: Low divergence -> Congruent In-Sync Cue Card."""
         res = self.runner.trigger_scenario(2)
 
         self.assertFalse(res["is_trigger"])
         self.assertLess(res["jsd_score"], 0.15)
-        self.assertIsNone(res["cue_data"])
+        self.assertIsNotNone(res["cue_data"])
+        self.assertEqual(res["cue_data"]["social_cue_type"], "In Sync / Authentic")
+        self.assertGreater(len(self.cue_history), 0)
 
         print("\n[Scenario 2: Sincere Praise] Result:")
-        print(f"JSD: {res['jsd_score']:.3f} | Trigger: {res['is_trigger']} (Zero notification fatigue)")
+        print(f"JSD: {res['jsd_score']:.3f} | Trigger: {res['is_trigger']} | Cue: {res['cue_data']['social_cue_type']}")
 
     def test_scenario_3_concealed_frustration(self):
         """Scenario 3: Polite words with vocal/facial tension -> Frustration Cue."""

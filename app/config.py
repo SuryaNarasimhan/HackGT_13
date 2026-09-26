@@ -53,12 +53,16 @@ TEXT_EMOTION_MODEL = os.getenv(
 )
 AUDIO_EMOTION_MODEL = os.getenv(
     "AUDIO_EMOTION_MODEL",
-    "ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition"
+    "amnesiackid/distilhubert-finetuned-ravdess"
+)
+VIDEO_EMOTION_MODEL = os.getenv(
+    "VIDEO_EMOTION_MODEL",
+    "dima806/facial_emotions_image_detection"
 )
 
 # Google Gemini Reasoner
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 
 # ---------------------------------------------------------------------------
 # UI & Overlay Styling
