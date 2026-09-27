@@ -499,7 +499,10 @@ final class TranscriptionClient: ObservableObject {
     private var diagnosticsTask: Task<Void, Never>?
     private var captureMessageQueue: [QueuedCaptureMessage] = []
     private let maximumCaptureQueueDepth = 80
+    private let audioMessagesBetweenVisualFrames = 5
+    private var audioMessagesSinceVisualFrame = 0
     private var captureQueueDroppedTotal = 0
+    private var captureVisualFramesCoalesced = 0
     private var capturePacketCounts: [String: Int] = [:]
     private var microphoneBufferCount = 0
     private var captureWindowScreenFrame: CGRect?
@@ -637,6 +640,8 @@ final class TranscriptionClient: ObservableObject {
         microphoneBufferReceived = false
         capturePacketCounts.removeAll()
         captureQueueDroppedTotal = 0
+        captureVisualFramesCoalesced = 0
+        audioMessagesSinceVisualFrame = 0
         microphoneBufferCount = 0
         stateLabel = "Starting"
         let windowID = selectedWindowID
@@ -1074,6 +1079,17 @@ final class TranscriptionClient: ObservableObject {
         }
         let messageType = message["type"] as? String ?? "unknown"
         capturePacketCounts[messageType, default: 0] += 1
+        if messageType == "visual_frame" {
+            // Keep the newest unsent image. Older frames only make the live
+            // estimate more stale when the audio send path is busy.
+            let staleVisualIndexes = captureMessageQueue.indices.filter {
+                captureMessageQueue[$0].type == "visual_frame"
+            }
+            for index in staleVisualIndexes.reversed() {
+                captureMessageQueue.remove(at: index)
+                captureVisualFramesCoalesced += 1
+            }
+        }
         if messageType == "microphone_gate", message["enabled"] as? Bool == false {
             // Send a mute command ahead of unsent mic chunks so a full upload
             // queue cannot keep local speech flowing after the user mutes.
@@ -1109,7 +1125,9 @@ final class TranscriptionClient: ObservableObject {
             guard let self else { return }
             while !Task.isCancelled, !self.captureMessageQueue.isEmpty {
                 guard let socket = self.ingestSocket else { break }
-                let item = self.captureMessageQueue.removeFirst()
+                let index = self.nextCaptureMessageIndex()
+                let item = self.captureMessageQueue.remove(at: index)
+                self.noteCaptureMessageScheduled(item.type)
                 do {
                     try await socket.send(.string(item.text))
                 } catch {
@@ -1132,10 +1150,55 @@ final class TranscriptionClient: ObservableObject {
     }
 
     private func captureQueueDropIndex(for incomingMessageType: String) -> Int? {
-        CaptureQueuePolicy.dropIndex(
-            incomingMessageType: incomingMessageType,
-            queuedMessageTypes: captureMessageQueue.map(\.type)
-        )
+        let queuedTypes = captureMessageQueue.map(\.type)
+        let dropOrder: [String]
+        switch incomingMessageType {
+        case "microphone_chunk":
+            // Preserve local mic audio and the latest visual frame.
+            dropOrder = ["audio_chunk", "microphone_chunk"]
+        case "audio_chunk":
+            // Drop stale audio before allowing the capture queue to starve
+            // visual updates.
+            dropOrder = ["audio_chunk", "microphone_chunk"]
+        case "visual_frame":
+            // A current visual frame needs a slot; stale audio is less useful
+            // than a frame that can update the live valence estimate.
+            dropOrder = ["visual_frame", "audio_chunk", "microphone_chunk"]
+        default:
+            return CaptureQueuePolicy.dropIndex(
+                incomingMessageType: incomingMessageType,
+                queuedMessageTypes: queuedTypes
+            )
+        }
+
+        for messageType in dropOrder {
+            if let index = queuedTypes.firstIndex(of: messageType) {
+                return index
+            }
+        }
+        return nil
+    }
+
+    private func nextCaptureMessageIndex() -> Int {
+        if let gateIndex = captureMessageQueue.firstIndex(where: { $0.type == "microphone_gate" }) {
+            return gateIndex
+        }
+        if audioMessagesSinceVisualFrame >= audioMessagesBetweenVisualFrames,
+           let visualIndex = captureMessageQueue.firstIndex(where: { $0.type == "visual_frame" }) {
+            return visualIndex
+        }
+        return captureMessageQueue.startIndex
+    }
+
+    private func noteCaptureMessageScheduled(_ messageType: String) {
+        switch messageType {
+        case "visual_frame":
+            audioMessagesSinceVisualFrame = 0
+        case "audio_chunk", "microphone_chunk":
+            audioMessagesSinceVisualFrame += 1
+        default:
+            break
+        }
     }
 
     private func recordCaptureQueueDrop(
@@ -1146,12 +1209,20 @@ final class TranscriptionClient: ObservableObject {
         captureQueueDroppedTotal += 1
         let dropped = captureQueueDroppedTotal
         guard dropped == 1 || dropped % 50 == 0 else { return }
+        let detail: String
+        if incomingDropped {
+            detail = "A capture packet was discarded because the send queue was full."
+        } else if incomingMessageType == "visual_frame" {
+            detail = "A queued capture packet was discarded to preserve a newer visual frame."
+        } else if incomingMessageType == "microphone_gate" {
+            detail = "A queued capture packet was discarded to deliver a microphone control update."
+        } else {
+            detail = "An older capture packet was discarded to preserve newer audio."
+        }
         reportDiagnostic(
             component: "capture_send_queue",
             event: "queue_overflow",
-            detail: incomingDropped
-                ? "A capture packet was discarded because the send queue was full."
-                : "An older capture packet was discarded to preserve newer audio.",
+            detail: detail,
             metadata: [
                 "dropped_total": dropped,
                 "queue_depth": captureMessageQueue.count,
@@ -1225,6 +1296,7 @@ final class TranscriptionClient: ObservableObject {
                         "microphone_input_level": self.microphoneLevel,
                         "ingest_send_queue_depth": self.captureMessageQueue.count,
                         "ingest_packets_dropped": self.captureQueueDroppedTotal,
+                        "ingest_visual_frames_coalesced": self.captureVisualFramesCoalesced,
                         "overlay_socket_connected": self.isConnected
                     ]
                 )

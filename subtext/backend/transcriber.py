@@ -32,8 +32,8 @@ class AudioTranscriber:
     # loopback audio (especially on built-in laptop microphone arrays). Keep
     # its gate low enough to preserve ordinary speech; Whisper's own VAD and
     # segment confidence checks remain the false-positive filter.
-    microphone_speech_threshold = 0.003
-    call_speech_threshold = 0.006
+    microphone_speech_threshold = 0.02
+    call_speech_threshold = 0.02
     pre_roll_frames = 2
     silence_seconds = 0.70
     max_utterance_seconds = 12.0
