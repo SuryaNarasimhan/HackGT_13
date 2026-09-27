@@ -15,6 +15,7 @@ from schemas import (
     AlignedSequence,
     AudioCue,
     LLMInterpretation,
+    MismatchCandidate,
     TranscriptCue,
     VisualCue,
     VisualSubjectCue,
@@ -30,6 +31,13 @@ if not _gemini_logger.handlers:
     _gemini_logger.addHandler(_handler)
     _gemini_logger.propagate = False
 _gemini_logger.setLevel(logging.INFO)
+_mismatch_logger = logging.getLogger("subtext.mismatch")
+if not _mismatch_logger.handlers:
+    _mismatch_handler = logging.StreamHandler()
+    _mismatch_handler.setFormatter(logging.Formatter("%(asctime)s [Mismatch] %(message)s", "%H:%M:%S"))
+    _mismatch_logger.addHandler(_mismatch_handler)
+    _mismatch_logger.propagate = False
+_mismatch_logger.setLevel(logging.INFO)
 
 
 class ConversationPipeline:
@@ -46,6 +54,8 @@ class ConversationPipeline:
         self._transcript: deque[TranscriptCue] = deque(maxlen=self.maximum_cues_per_kind)
         self._audio: deque[AudioCue] = deque(maxlen=self.maximum_cues_per_kind)
         self._visual: deque[VisualCue] = deque(maxlen=self.maximum_cues_per_kind)
+        self._mismatch_candidates: deque[MismatchCandidate] = deque(maxlen=self.maximum_cues_per_kind)
+        self._reviewed_mismatch_candidates: set[str] = set()
         self._visual_baselines: dict[str, deque[dict[str, float]]] = {}
         self._next_analysis_at = 8.0
         self._analysis_in_flight = False
@@ -58,6 +68,8 @@ class ConversationPipeline:
         self._transcript.clear()
         self._audio.clear()
         self._visual.clear()
+        self._mismatch_candidates.clear()
+        self._reviewed_mismatch_candidates.clear()
         self._visual_baselines.clear()
         self._next_analysis_at = 8.0
         self._analysis_in_flight = False
@@ -69,6 +81,8 @@ class ConversationPipeline:
         self._transcript.clear()
         self._audio.clear()
         self._visual.clear()
+        self._mismatch_candidates.clear()
+        self._reviewed_mismatch_candidates.clear()
         self._visual_baselines.clear()
         self._next_analysis_at = 8.0
 
@@ -97,6 +111,23 @@ class ConversationPipeline:
     def add_audio_event(self, event: dict[str, Any]) -> None:
         self._audio.append(AudioCue.model_validate(event["cue"]))
         self._trim_old_cues(self._audio[-1].end_s)
+
+    def add_mismatch_candidate(self, event: dict[str, Any]) -> None:
+        candidate = MismatchCandidate.model_validate(
+            {key: value for key, value in event.items() if key != "type"}
+        )
+        self._mismatch_candidates.append(candidate)
+        self._trim_old_cues(candidate.end_s)
+        _mismatch_logger.info(
+            "local candidate queued | id=%s source=%s trigger=%s time=%.1f-%.1fs "
+            "gemini_configured=%s",
+            candidate.id,
+            candidate.speaker_id,
+            candidate.trigger,
+            candidate.start_s,
+            candidate.end_s,
+            self.interpreter.configured,
+        )
 
     def add_visual_frame(self, message: dict[str, Any]) -> None:
         timestamp = float(message.get("timestamp", time.time()))
@@ -155,6 +186,45 @@ class ConversationPipeline:
         self._visual.append(cue)
         self._trim_old_cues(relative_s)
 
+    def add_valence_update(self, event: dict[str, Any]) -> None:
+        visual_id = event.get("visual_id")
+        if not isinstance(visual_id, str) or not visual_id:
+            return
+
+        scores: dict[str, tuple[float | None, int]] = {}
+        for score in event.get("scores", []):
+            if not isinstance(score, dict) or not isinstance(score.get("track_id"), str):
+                continue
+            try:
+                valence = float(score["valence"]) if score.get("valence") is not None else None
+                frames_seen = max(0, int(score.get("frames_seen", 0)))
+                if valence is not None and not -1.0 <= valence <= 1.0:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            scores[score["track_id"]] = (valence, frames_seen)
+
+        if not scores:
+            return
+        for index in range(len(self._visual) - 1, -1, -1):
+            cue = self._visual[index]
+            if cue.id != visual_id:
+                continue
+            subjects = [
+                VisualSubjectCue.model_validate(
+                    {
+                        **subject.model_dump(exclude_none=True),
+                        "facial_valence": scores[subject.track_id][0],
+                        "valence_frames_seen": scores[subject.track_id][1],
+                    }
+                )
+                if subject.track_id in scores
+                else subject
+                for subject in cue.subjects
+            ]
+            self._visual[index] = cue.model_copy(update={"subjects": subjects})
+            return
+
     async def maybe_analyze(self, publish: EventHandler) -> None:
         if not self.interpreter.configured or self._analysis_in_flight:
             return
@@ -181,6 +251,14 @@ class ConversationPipeline:
         visual = sorted(
             (cue for cue in self._visual if cue.end_s >= start_s and cue.start_s <= current_s),
             key=lambda cue: cue.start_s,
+        )
+        mismatch_candidates = sorted(
+            (
+                candidate
+                for candidate in self._mismatch_candidates
+                if candidate.end_s >= start_s and candidate.start_s <= current_s
+            ),
+            key=lambda candidate: candidate.start_s,
         )
         timeline: list[AlignedStep] = []
         step_start = start_s
@@ -213,6 +291,7 @@ class ConversationPipeline:
             transcript=transcript,
             audio=audio,
             visual=visual,
+            mismatch_candidates=mismatch_candidates,
             timeline=timeline,
         )
         if not sequence.transcript or not sequence.audio or not sequence.visual:
@@ -221,13 +300,23 @@ class ConversationPipeline:
         self._next_analysis_at = current_s + self.analysis_spacing_seconds
         self._analysis_in_flight = True
         _gemini_logger.info(
-            "sending to %s (%.1fs window; transcript=%d, audio=%d, visual=%d cues)",
+            "sending to %s (%.1fs window; transcript=%d, audio=%d, visual=%d cues, mismatch_candidates=%d)",
             self.interpreter.model,
             sequence.end_s - sequence.start_s,
             len(sequence.transcript),
             len(sequence.audio),
             len(sequence.visual),
+            len(sequence.mismatch_candidates),
         )
+        if sequence.mismatch_candidates:
+            _mismatch_logger.info(
+                "candidate review scheduled in existing Gemini window | candidates=%s "
+                "window=%.1f-%.1fs spacing=%.1fs",
+                [candidate.id for candidate in sequence.mismatch_candidates],
+                sequence.start_s,
+                sequence.end_s,
+                self.analysis_spacing_seconds,
+            )
         asyncio.create_task(self._interpret_and_publish(sequence, publish, self._generation))
 
     async def _interpret_and_publish(
@@ -243,6 +332,12 @@ class ConversationPipeline:
             if generation != self._generation:
                 return
             _gemini_logger.error("request failed on %s: %s", self.interpreter.model, exc)
+            if sequence.mismatch_candidates:
+                _mismatch_logger.warning(
+                    "candidate review failed | candidate_count=%d error_type=%s",
+                    len(sequence.mismatch_candidates),
+                    type(exc).__name__,
+                )
             await publish(
                 {
                     "type": "llm_status",
@@ -250,6 +345,7 @@ class ConversationPipeline:
                     "detail": str(exc),
                 }
             )
+            await self._publish_unavailable_mismatch_reviews(sequence, publish)
         except Exception:
             if generation != self._generation:
                 return
@@ -263,6 +359,7 @@ class ConversationPipeline:
                     "detail": "Subtext could not interpret this conversation window.",
                 }
             )
+            await self._publish_unavailable_mismatch_reviews(sequence, publish)
         else:
             if generation != self._generation:
                 return
@@ -270,7 +367,7 @@ class ConversationPipeline:
                 "response from %s in %.2fs:\n%s",
                 self.interpreter.model,
                 time.monotonic() - request_started,
-                result.model_dump_json(exclude_none=True, indent=2),
+                result.model_dump_json(indent=2, exclude_none=True),
             )
             await publish(
                 {
@@ -282,12 +379,106 @@ class ConversationPipeline:
                     "analysis": result.model_dump(exclude_none=True),
                 }
             )
+            await self._publish_mismatch_alerts(sequence, result, publish)
         finally:
             if generation == self._generation:
                 self._analysis_in_flight = False
 
+    async def _publish_mismatch_alerts(
+        self,
+        sequence: AlignedSequence,
+        result: LLMInterpretation,
+        publish: EventHandler,
+    ) -> None:
+        candidates = sequence.mismatch_candidates
+        if not candidates:
+            return
+
+        signal = result.implied_meaning
+        evidence_ids = set(signal.evidence_ids)
+        can_confirm = (
+            signal.detected
+            and signal.kind == "sarcasm"
+            and signal.confidence >= 70
+            and bool(signal.quote.strip())
+            and bool(signal.meaning.strip())
+        )
+
+        for candidate in candidates:
+            if candidate.id in self._reviewed_mismatch_candidates:
+                continue
+
+            candidate_is_supported = (
+                can_confirm
+                and candidate.transcript_id in evidence_ids
+                and candidate.audio_id in evidence_ids
+            )
+            self._reviewed_mismatch_candidates.add(candidate.id)
+            if not candidate_is_supported:
+                _mismatch_logger.info(
+                    "candidate review processed | candidate_id=%s outcome=unclear detected=%s "
+                    "kind=%s confidence=%d evidence_ids=%s",
+                    candidate.id,
+                    signal.detected,
+                    signal.kind,
+                    signal.confidence,
+                    signal.evidence_ids,
+                )
+                await publish(
+                    {
+                        "type": "mismatch_review",
+                        "id": candidate.id,
+                        "timestamp": time.time(),
+                        "outcome": "unclear",
+                    }
+                )
+                continue
+
+            _mismatch_logger.info(
+                "candidate review processed | candidate_id=%s outcome=confirmed confidence=%d "
+                "evidence_ids=%s",
+                candidate.id,
+                signal.confidence,
+                signal.evidence_ids,
+            )
+            await publish(
+                {
+                    "type": "mismatch_alert",
+                    "id": candidate.id,
+                    "timestamp": time.time(),
+                    "quote": signal.quote,
+                    "interpretation": signal.meaning,
+                }
+            )
+
+    async def _publish_unavailable_mismatch_reviews(
+        self,
+        sequence: AlignedSequence,
+        publish: EventHandler,
+    ) -> None:
+        for candidate in sequence.mismatch_candidates:
+            if candidate.id in self._reviewed_mismatch_candidates:
+                continue
+            _mismatch_logger.info(
+                "candidate review processed | candidate_id=%s outcome=unavailable confidence=n/a",
+                candidate.id,
+            )
+            await publish(
+                {
+                    "type": "mismatch_review",
+                    "id": candidate.id,
+                    "timestamp": time.time(),
+                    "outcome": "unavailable",
+                }
+            )
+
     def _trim_old_cues(self, current_s: float) -> None:
         cutoff = max(0.0, current_s - 90.0)
-        for collection in (self._transcript, self._audio, self._visual):
+        for collection in (
+            self._transcript,
+            self._audio,
+            self._visual,
+            self._mismatch_candidates,
+        ):
             while collection and collection[0].end_s < cutoff:
                 collection.popleft()

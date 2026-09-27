@@ -33,6 +33,15 @@ gentle check-in question. Face movement, gaze, pauses, pitch, loudness, or a
 single phrase alone do not establish an emotion or intent. A change from baseline
 is a difference, not proof of a feeling. Do not impose neurotypical expectations
 about eye contact, facial expression, response speed, or turn-taking.
+Some visual subjects may include facial_valence, a smoothed estimate from a local
+face model. It is an uncertain scalar from -1 to 1, not a probability or a label;
+use it only with the other time-aligned evidence.
+
+The input may include mismatch_candidates from a conservative local text-and-voice
+heuristic. Treat these only as pointers for review, never as evidence or a
+conclusion. Confirm a candidate from the aligned transcript, audio, and visual
+evidence independently. If the cues do not support sarcasm or another clear
+verbal/nonverbal mismatch, abstain.
 
 Keep the result brief and useful during a conversation. If the evidence is weak,
 mixed, or has several plausible readings, set no_clear_signal to true, leave
@@ -364,7 +373,14 @@ class GeminiInterpreter:
             for cue in sequence.visual
             if cue.id in evidence_ids
             and any(
-                subject.face_present and bool(subject.change_from_baseline)
+                subject.face_present
+                and (
+                    bool(subject.change_from_baseline)
+                    or (
+                        subject.facial_valence is not None
+                        and (subject.valence_frames_seen or 0) >= 10
+                    )
+                )
                 for subject in cue.subjects
             )
             and any(

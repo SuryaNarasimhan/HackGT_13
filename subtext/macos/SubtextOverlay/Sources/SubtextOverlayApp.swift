@@ -11,6 +11,7 @@ import AudioToolbox
 import CoreAudio
 import ImageIO
 import Vision
+import CaptureSupport
 
 @main
 struct SubtextOverlayApp: App {
@@ -151,6 +152,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSWorkspace.shared.notificationCenter.removeObserver(workspaceActivationObserver)
         }
         speakerOverlayPanel?.orderOut(nil)
+        client.stopOwnedBackend()
     }
 }
 
@@ -250,11 +252,218 @@ private struct ServerEvent: Decodable {
     let detail: String?
     let id: String?
     let text: String?
+    let transcriptId: String?
     let timestamp: Double?
     let speakerId: String?
+    let trigger: String?
+    let outcome: String?
     let geminiConfigured: Bool?
     let analysis: ConversationAnalysis?
     let scores: [ValenceScorePayload]?
+    let quote: String?
+    let interpretation: String?
+}
+
+private struct QueuedCaptureMessage {
+    let type: String
+    let text: String
+}
+
+enum MismatchCheckStatus: Equatable {
+    case checking
+    case confirmed
+    case unclear
+    case unavailable
+    case needsSetup
+    case needsVisualSource
+
+    var label: String {
+        switch self {
+        case .checking: "Reviewing"
+        case .confirmed: "Possible mismatch"
+        case .unclear: "Unclear"
+        case .unavailable: "Review unavailable"
+        case .needsSetup: "Local cue"
+        case .needsVisualSource: "Local cue"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .checking: "Words and voice raised a cue · checking visual context"
+        case .confirmed: ""
+        case .unclear: "No clear mismatch was confirmed."
+        case .unavailable: "The multimodal review could not finish."
+        case .needsSetup: "Words and voice raised a cue · add a Gemini key for review."
+        case .needsVisualSource: "Words and voice raised a cue · choose a call window for visual review."
+        }
+    }
+
+    var visualColor: Color {
+        switch self {
+        case .checking: .orange
+        case .confirmed: .green
+        case .unclear, .needsSetup, .needsVisualSource: .white.opacity(0.48)
+        case .unavailable: .orange.opacity(0.72)
+        }
+    }
+}
+
+struct MismatchCheck: Identifiable {
+    let id: String
+    let transcriptID: String?
+    var quote: String
+    var interpretation: String?
+    var status: MismatchCheckStatus
+}
+
+@MainActor
+private final class LocalBackendSupervisor {
+    private enum StartupError: LocalizedError {
+        case projectNotFound
+        case launchFailed(String)
+        case didNotBecomeReady
+
+        var errorDescription: String? {
+            switch self {
+            case .projectNotFound:
+                return "The local transcription service is not running, and Subtext could not find its Python environment. Launch Subtext with scripts/run.sh once to install it, then reopen the app."
+            case .launchFailed(let detail):
+                return "Subtext could not start its local transcription service: \(detail)"
+            case .didNotBecomeReady:
+                return "The local transcription service did not become ready. Check the project’s scripts/run.sh output for startup errors."
+            }
+        }
+    }
+
+    private let serviceURL: URL
+    private var ownedProcess: Process?
+
+    init(serviceURL: URL) {
+        self.serviceURL = serviceURL
+    }
+
+    func ensureAvailable() async throws {
+        if await serviceIsHealthy() {
+            return
+        }
+
+        if let ownedProcess, ownedProcess.isRunning {
+            do {
+                try await waitForService()
+            } catch {
+                stopOwnedProcess()
+                throw error
+            }
+            return
+        }
+        ownedProcess = nil
+
+        guard let backendDirectory = BackendProjectLocator.backendDirectory(
+            bundleURL: Bundle.main.bundleURL
+        ) else {
+            throw StartupError.projectNotFound
+        }
+
+        let python = backendDirectory.appendingPathComponent(".venv/bin/python")
+        let process = Process()
+        process.executableURL = python
+        process.arguments = [
+            "-m", "uvicorn", "app:app",
+            "--host", "127.0.0.1",
+            "--port", "8765",
+            "--log-level", "info"
+        ]
+        process.currentDirectoryURL = backendDirectory
+        process.environment = backendEnvironment(at: backendDirectory)
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+        } catch {
+            throw StartupError.launchFailed(error.localizedDescription)
+        }
+        ownedProcess = process
+
+        do {
+            try await waitForService()
+        } catch {
+            stopOwnedProcess()
+            throw error
+        }
+    }
+
+    func stopOwnedProcess() {
+        guard let process = ownedProcess else { return }
+        ownedProcess = nil
+        if process.isRunning {
+            process.terminate()
+        }
+    }
+
+    private func waitForService() async throws {
+        let deadline = Date().addingTimeInterval(30)
+        while Date() < deadline {
+            if Task.isCancelled {
+                throw CancellationError()
+            }
+            if await serviceIsHealthy() {
+                return
+            }
+            if ownedProcess?.isRunning == false {
+                ownedProcess = nil
+                throw StartupError.didNotBecomeReady
+            }
+            try await Task.sleep(nanoseconds: 250_000_000)
+        }
+        throw StartupError.didNotBecomeReady
+    }
+
+    private func serviceIsHealthy() async -> Bool {
+        var request = URLRequest(url: serviceURL.appending(path: "/health"))
+        request.timeoutInterval = 1
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let response = response as? HTTPURLResponse,
+              (200..<300).contains(response.statusCode),
+              let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return false
+        }
+        return body["ok"] as? Bool == true
+    }
+
+    private func backendEnvironment(at backendDirectory: URL) -> [String: String] {
+        var environment = ProcessInfo.processInfo.environment
+        let envFile = backendDirectory.appendingPathComponent(".env.local")
+        guard let contents = try? String(contentsOf: envFile, encoding: .utf8) else {
+            return environment
+        }
+
+        for rawLine in contents.components(separatedBy: .newlines) {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !line.isEmpty, !line.hasPrefix("#"), let separator = line.firstIndex(of: "=") else {
+                continue
+            }
+            let key = line[..<separator].trimmingCharacters(in: .whitespaces)
+            guard key.range(of: "^[A-Za-z_][A-Za-z0-9_]*$", options: .regularExpression) != nil else {
+                continue
+            }
+            if let existingValue = environment[key], !existingValue.isEmpty {
+                continue
+            }
+
+            var value = String(line[line.index(after: separator)...]).trimmingCharacters(in: .whitespaces)
+            if value.count >= 2,
+               let first = value.first,
+               (first == "'" || first == "\""),
+               value.last == first {
+                value.removeFirst()
+                value.removeLast()
+            }
+            environment[key] = value
+        }
+        return environment
+    }
 }
 
 @MainActor
@@ -273,6 +482,7 @@ final class TranscriptionClient: ObservableObject {
     @Published var selectedWindowID: UInt32?
     @Published private(set) var geminiConfigured = false
     @Published private(set) var latestAnalysis: ConversationAnalysis?
+    @Published private(set) var latestMismatchCheck: MismatchCheck?
     @Published private(set) var valenceEstimates: [ValenceEstimate] = []
     @Published private(set) var valencePersonNames: [String: String] = [:]
     @Published private(set) var valenceModelState = "not_loaded"
@@ -280,13 +490,15 @@ final class TranscriptionClient: ObservableObject {
 
     private var latestAnalysisID: String?
     private var latestAnalysisTask: Task<Void, Never>?
+    private var latestMismatchTask: Task<Void, Never>?
     private var receiveTask: Task<Void, Never>?
     private var socket: URLSessionWebSocketTask?
     private var ingestSocket: URLSessionWebSocketTask?
     private var captureSendTask: Task<Void, Never>?
     private var ingestReceiveTask: Task<Void, Never>?
     private var diagnosticsTask: Task<Void, Never>?
-    private var captureMessageQueue: [String] = []
+    private var captureMessageQueue: [QueuedCaptureMessage] = []
+    private let maximumCaptureQueueDepth = 80
     private var captureQueueDroppedTotal = 0
     private var capturePacketCounts: [String: Int] = [:]
     private var microphoneBufferCount = 0
@@ -296,6 +508,7 @@ final class TranscriptionClient: ObservableObject {
     private let microphoneCapture = MicrophoneCaptureCoordinator()
     private let captureCoordinator = ScreenCaptureCoordinator()
     private let serviceURL = URL(string: "http://127.0.0.1:8765")!
+    private lazy var backendSupervisor = LocalBackendSupervisor(serviceURL: serviceURL)
     private let websocketSession: URLSession = {
         let configuration = URLSessionConfiguration.default
         // Capture and transcript sockets can remain quiet in one direction
@@ -373,6 +586,17 @@ final class TranscriptionClient: ObservableObject {
             guard let self else { return }
 
             while !Task.isCancelled {
+                do {
+                    try await backendSupervisor.ensureAvailable()
+                } catch {
+                    isConnected = false
+                    isListening = false
+                    stateLabel = "Service unavailable"
+                    errorMessage = error.localizedDescription
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    continue
+                }
+
                 let candidate = websocketSession.webSocketTask(
                     with: URL(string: "ws://127.0.0.1:8765/ws")!
                 )
@@ -411,18 +635,17 @@ final class TranscriptionClient: ObservableObject {
         landmarkPreview = nil
         microphoneLevel = 0
         microphoneBufferReceived = false
-        microphoneMuted = true
-        microphoneCapture.setMuted(true)
         capturePacketCounts.removeAll()
         captureQueueDroppedTotal = 0
         microphoneBufferCount = 0
         stateLabel = "Starting"
-        guard let windowID = selectedWindowID else {
-            errorMessage = "Choose the window for your call first."
-            stateLabel = "Choose call window"
-            return
-        }
+        let windowID = selectedWindowID
 
+        // Starting a capture session is the user's explicit request to
+        // transcribe both sides. The mic control remains available to mute
+        // local transcription immediately at any point during the session.
+        microphoneMuted = false
+        microphoneCapture.setMuted(false)
         isStarting = true
         let captureSocket = websocketSession.webSocketTask(
             with: URL(string: "ws://127.0.0.1:8765/ingest")!
@@ -432,12 +655,22 @@ final class TranscriptionClient: ObservableObject {
         startIngestReceiveLoop(for: captureSocket)
         do {
             try await post(path: "/start")
-            sendCaptureMessage(["type": "microphone_gate", "enabled": false])
+            sendCaptureMessage(["type": "microphone_gate", "enabled": true])
             try await microphoneCapture.start()
-            try await captureCoordinator.start(windowID: windowID)
+            if let windowID {
+                try await captureCoordinator.start(windowID: windowID)
+            } else {
+                reportDiagnostic(
+                    component: "screen_capture",
+                    event: "microphone_only_session",
+                    detail: "Microphone transcription started without a selected call window."
+                )
+            }
             startDiagnosticsHeartbeat()
             isStarting = false
-            if !geminiConfigured {
+            if windowID == nil {
+                stateLabel = "Listening · microphone only"
+            } else if !geminiConfigured {
                 stateLabel = "Listening · Gemini key needed"
             }
         } catch {
@@ -447,7 +680,7 @@ final class TranscriptionClient: ObservableObject {
                 component: "capture_start",
                 event: "start_failed",
                 detail: error.localizedDescription,
-                metadata: ["selected_window_id": windowID]
+                metadata: ["selected_window_id": windowID.map(String.init) ?? "none"]
             )
             isStarting = false
             isListening = false
@@ -537,11 +770,17 @@ final class TranscriptionClient: ObservableObject {
         latestAnalysis = nil
         latestAnalysisID = nil
         latestAnalysisTask?.cancel()
+        latestMismatchCheck = nil
+        latestMismatchTask?.cancel()
         Task {
             var request = URLRequest(url: serviceURL.appending(path: "/transcript"))
             request.httpMethod = "DELETE"
             _ = try? await URLSession.shared.data(for: request)
         }
+    }
+
+    func stopOwnedBackend() {
+        backendSupervisor.stopOwnedProcess()
     }
 
     private func post(path: String) async throws {
@@ -585,11 +824,13 @@ final class TranscriptionClient: ObservableObject {
             transcript.removeAll()
             latestAnalysis = nil
             latestAnalysisID = nil
+            latestMismatchCheck = nil
             valenceEstimates.removeAll()
             valencePersonNames.removeAll()
             valenceModelState = "not_loaded"
             valenceModelDetail = nil
             latestAnalysisTask?.cancel()
+            latestMismatchTask?.cancel()
             return
         }
 
@@ -619,16 +860,38 @@ final class TranscriptionClient: ObservableObject {
         }
 
         if event.type == "transcript", let text = event.text, !text.isEmpty {
-            transcript.append(
-                TranscriptEntry(
-                    id: event.id ?? UUID().uuidString,
-                    text: text,
-                    timestamp: Date(timeIntervalSince1970: event.timestamp ?? Date().timeIntervalSince1970),
-                    speakerID: event.speakerId ?? "self"
-                )
+            let entry = TranscriptEntry(
+                id: event.id ?? UUID().uuidString,
+                text: text,
+                timestamp: Date(timeIntervalSince1970: event.timestamp ?? Date().timeIntervalSince1970),
+                speakerID: event.speakerId ?? "self"
             )
+            transcript.append(entry)
+            if var check = latestMismatchCheck, check.transcriptID == entry.id {
+                check.quote = entry.text
+                latestMismatchCheck = check
+            }
             if transcript.count > 40 {
                 transcript.removeFirst(transcript.count - 40)
+            }
+            return
+        }
+
+        if event.type == "mismatch_candidate",
+           let checkID = event.id,
+           let transcriptID = event.transcriptId {
+            latestMismatchTask?.cancel()
+            latestMismatchCheck = MismatchCheck(
+                id: checkID,
+                transcriptID: transcriptID,
+                quote: transcript.first(where: { $0.id == transcriptID })?.text ?? "",
+                interpretation: nil,
+                status: !geminiConfigured
+                    ? .needsSetup
+                    : (selectedWindowID == nil ? .needsVisualSource : .checking)
+            )
+            if !geminiConfigured || selectedWindowID == nil {
+                scheduleMismatchCheckDismissal(checkID)
             }
             return
         }
@@ -648,6 +911,42 @@ final class TranscriptionClient: ObservableObject {
             return
         }
 
+        if event.type == "mismatch_alert",
+           let alertID = event.id,
+           let quote = event.quote,
+           let interpretation = event.interpretation {
+            latestAnalysis = nil
+            latestAnalysisID = nil
+            latestAnalysisTask?.cancel()
+            if var check = latestMismatchCheck, check.id == alertID {
+                check.quote = quote
+                check.interpretation = interpretation
+                check.status = .confirmed
+                latestMismatchCheck = check
+            } else {
+                latestMismatchCheck = MismatchCheck(
+                    id: alertID,
+                    transcriptID: nil,
+                    quote: quote,
+                    interpretation: interpretation,
+                    status: .confirmed
+                )
+            }
+            scheduleMismatchCheckDismissal(alertID)
+            return
+        }
+
+        if event.type == "mismatch_review",
+           let checkID = event.id,
+           let outcome = event.outcome,
+           var check = latestMismatchCheck,
+           check.id == checkID {
+            check.status = outcome == "unavailable" ? .unavailable : .unclear
+            latestMismatchCheck = check
+            scheduleMismatchCheckDismissal(checkID)
+            return
+        }
+
         if event.type == "llm_status", let detail = event.detail {
             errorMessage = detail
             return
@@ -658,6 +957,7 @@ final class TranscriptionClient: ObservableObject {
         case "idle":
             isListening = false
             isStarting = false
+            errorMessage = nil
             stateLabel = "Ready"
         case "loading_model":
             isStarting = true
@@ -777,34 +1077,32 @@ final class TranscriptionClient: ObservableObject {
         if messageType == "microphone_gate", message["enabled"] as? Bool == false {
             // Send a mute command ahead of unsent mic chunks so a full upload
             // queue cannot keep local speech flowing after the user mutes.
-            captureMessageQueue.removeAll { queued in
-                guard let data = queued.data(using: .utf8),
-                      let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-                else {
-                    return false
-                }
-                return payload["type"] as? String == "microphone_chunk"
-            }
-            captureMessageQueue.insert(text, at: 0)
-        } else {
-            captureMessageQueue.append(text)
+            captureMessageQueue.removeAll { $0.type == "microphone_chunk" }
         }
-        if captureMessageQueue.count > 80 {
-            let dropped = captureMessageQueue.count - 80
-            captureMessageQueue.removeFirst(dropped)
-            captureQueueDroppedTotal += dropped
-            if captureQueueDroppedTotal == dropped || captureQueueDroppedTotal % 50 < dropped {
-                reportDiagnostic(
-                    component: "capture_send_queue",
-                    event: "queue_overflow",
-                    detail: "Oldest capture packets were discarded because sending fell behind.",
-                    metadata: [
-                        "dropped_total": captureQueueDroppedTotal,
-                        "queue_depth": captureMessageQueue.count,
-                        "message_type": message["type"] as? String ?? "unknown"
-                    ]
+
+        if captureMessageQueue.count >= maximumCaptureQueueDepth {
+            if let dropIndex = captureQueueDropIndex(for: messageType) {
+                let droppedMessage = captureMessageQueue.remove(at: dropIndex)
+                recordCaptureQueueDrop(
+                    messageType: droppedMessage.type,
+                    incomingMessageType: messageType,
+                    incomingDropped: false
                 )
+            } else {
+                recordCaptureQueueDrop(
+                    messageType: messageType,
+                    incomingMessageType: messageType,
+                    incomingDropped: true
+                )
+                return
             }
+        }
+
+        let queuedMessage = QueuedCaptureMessage(type: messageType, text: text)
+        if messageType == "microphone_gate" {
+            captureMessageQueue.insert(queuedMessage, at: 0)
+        } else {
+            captureMessageQueue.append(queuedMessage)
         }
         guard captureSendTask == nil else { return }
         captureSendTask = Task { [weak self] in
@@ -813,16 +1111,14 @@ final class TranscriptionClient: ObservableObject {
                 guard let socket = self.ingestSocket else { break }
                 let item = self.captureMessageQueue.removeFirst()
                 do {
-                    try await socket.send(.string(item))
+                    try await socket.send(.string(item.text))
                 } catch {
-                    let itemData = Data(item.utf8)
-                    let itemObject = (try? JSONSerialization.jsonObject(with: itemData)) as? [String: Any]
                     self.reportDiagnostic(
                         component: "capture_ingest_socket",
                         event: "send_failed",
                         detail: error.localizedDescription,
                         metadata: [
-                            "message_type": itemObject?["type"] as? String ?? "unknown",
+                            "message_type": item.type,
                             "queued_messages": self.captureMessageQueue.count,
                             "socket_close_code": socket.closeCode.rawValue
                         ]
@@ -833,6 +1129,37 @@ final class TranscriptionClient: ObservableObject {
             }
             self.captureSendTask = nil
         }
+    }
+
+    private func captureQueueDropIndex(for incomingMessageType: String) -> Int? {
+        CaptureQueuePolicy.dropIndex(
+            incomingMessageType: incomingMessageType,
+            queuedMessageTypes: captureMessageQueue.map(\.type)
+        )
+    }
+
+    private func recordCaptureQueueDrop(
+        messageType: String,
+        incomingMessageType: String,
+        incomingDropped: Bool
+    ) {
+        captureQueueDroppedTotal += 1
+        let dropped = captureQueueDroppedTotal
+        guard dropped == 1 || dropped % 50 == 0 else { return }
+        reportDiagnostic(
+            component: "capture_send_queue",
+            event: "queue_overflow",
+            detail: incomingDropped
+                ? "A capture packet was discarded because the send queue was full."
+                : "An older capture packet was discarded to preserve newer audio.",
+            metadata: [
+                "dropped_total": dropped,
+                "queue_depth": captureMessageQueue.count,
+                "message_type": messageType,
+                "incoming_message_type": incomingMessageType,
+                "incoming_dropped": incomingDropped
+            ]
+        )
     }
 
     private func reportDiagnostic(
@@ -866,6 +1193,15 @@ final class TranscriptionClient: ObservableObject {
                     error.localizedDescription
                 )
             }
+        }
+    }
+
+    private func scheduleMismatchCheckDismissal(_ checkID: String) {
+        latestMismatchTask?.cancel()
+        latestMismatchTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 8_000_000_000)
+            guard let self, self.latestMismatchCheck?.id == checkID else { return }
+            self.latestMismatchCheck = nil
         }
     }
 
@@ -931,7 +1267,78 @@ struct OverlayView: View {
     }
 
     private var showsAnalysisCard: Bool {
-        impliedMeaningAlert != nil || client.latestAnalysis?.noClearSignal == false
+        client.isListening
+            || client.latestMismatchCheck != nil
+            || impliedMeaningAlert != nil
+            || client.latestAnalysis?.noClearSignal == false
+    }
+
+    @ViewBuilder
+    private var mismatchCheckCard: some View {
+        if let check = client.latestMismatchCheck {
+            VStack(alignment: .leading, spacing: 7) {
+                HStack {
+                    Label("Mismatch review", systemImage: "arrow.left.arrow.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Color.orange.opacity(0.95))
+                    Spacer(minLength: 8)
+                    Text(check.status.label)
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(check.status.visualColor)
+                        .lineLimit(1)
+                }
+
+                if !check.quote.isEmpty {
+                    Text("“\(check.quote)”")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.88))
+                        .lineLimit(1)
+                }
+
+                HStack(spacing: 5) {
+                    mismatchStep("Words", icon: "text.quote", color: .green)
+                    Capsule().fill(Color.white.opacity(0.18)).frame(width: 9, height: 1)
+                    mismatchStep("Voice", icon: "waveform", color: .green)
+                    Capsule().fill(Color.white.opacity(0.18)).frame(width: 9, height: 1)
+                    mismatchStep(
+                        "Visual cues",
+                        icon: check.status == .checking ? "eye" : (check.status == .confirmed ? "checkmark" : "ellipsis"),
+                        color: check.status.visualColor
+                    )
+                }
+
+                let note = check.interpretation ?? check.status.detail
+                if !note.isEmpty {
+                    Text(note)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.64))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .lineLimit(2)
+                }
+            }
+            .padding(9)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.orange.opacity(0.085), in: RoundedRectangle(cornerRadius: 11))
+            .overlay {
+                RoundedRectangle(cornerRadius: 11)
+                    .stroke(Color.orange.opacity(0.20), lineWidth: 1)
+            }
+        }
+    }
+
+    private func mismatchStep(_ title: String, icon: String, color: Color) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.system(size: 8, weight: .bold))
+                .foregroundStyle(color)
+            Text(title)
+                .font(.system(size: 9, weight: .medium))
+                .foregroundStyle(.white.opacity(0.72))
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 5)
+        .background(Color.white.opacity(0.055), in: Capsule())
     }
 
     private var statusColor: Color {
@@ -1119,9 +1526,11 @@ struct OverlayView: View {
             }
             .padding(.bottom, 5)
 
-            Text(client.geminiConfigured
-                 ? "Raw audio and video stay here; transcript and measured cues go to Gemini."
-                 : "Audio, video, and transcription stay here. Add a Gemini key to enable interpretation.")
+            Text(client.selectedWindowID == nil
+                 ? "Choose a call window to include the other person's audio; your microphone can start now."
+                 : (client.geminiConfigured
+                    ? "Raw audio and video stay here; transcript and measured cues go to Gemini."
+                    : "Audio, video, and transcription stay here. Add a Gemini key to enable interpretation."))
                 .font(.system(size: 10))
                 .foregroundStyle(.white.opacity(0.46))
                 .fixedSize(horizontal: false, vertical: true)
@@ -1204,7 +1613,10 @@ struct OverlayView: View {
             }
             .frame(height: showsAnalysisCard ? 130 : 165)
 
-            if let signal = impliedMeaningAlert {
+            if client.latestMismatchCheck != nil {
+                mismatchCheckCard
+                    .padding(.top, 7)
+            } else if let signal = impliedMeaningAlert {
                 VStack(alignment: .leading, spacing: 5) {
                     Label("Possible implied meaning", systemImage: "text.quote")
                         .font(.system(size: 10, weight: .semibold))
@@ -1256,6 +1668,36 @@ struct OverlayView: View {
                 .padding(10)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 12))
+                .padding(.top, 7)
+            } else if client.isListening {
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack {
+                        Label("Mismatch analysis", systemImage: "arrow.left.arrow.right")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.66))
+                        Spacer()
+                        Circle().fill(Color.green.opacity(0.85)).frame(width: 5, height: 5)
+                        Text("LISTENING")
+                            .font(.system(size: 8, weight: .semibold))
+                            .tracking(0.7)
+                            .foregroundStyle(.white.opacity(0.48))
+                    }
+                    HStack(spacing: 5) {
+                        mismatchStep("Words + voice", icon: "waveform", color: .white.opacity(0.62))
+                        Capsule().fill(Color.white.opacity(0.18)).frame(width: 9, height: 1)
+                        mismatchStep("Visual review", icon: "eye", color: .white.opacity(0.42))
+                    }
+                    Text("Local cues can trigger a visual-context review.")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.48))
+                }
+                .padding(9)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 11))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 11)
+                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                }
                 .padding(.top, 7)
             }
 
@@ -1331,7 +1773,7 @@ struct OverlayView: View {
             Image(systemName: client.microphoneMuted ? "mic.slash.fill" : "mic.fill")
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.58))
-            Text("MACBOOK INPUT")
+            Text("MICROPHONE INPUT")
                 .font(.system(size: 8, weight: .semibold))
                 .tracking(0.8)
                 .foregroundStyle(.white.opacity(0.48))
@@ -1715,9 +2157,12 @@ final class MicrophoneCaptureCoordinator {
     private var converter: AVAudioConverter?
     private var outputFormat: AVAudioFormat?
     private var engineConfigurationObserver: NSObjectProtocol?
-    private let configurationChangeLock = NSLock()
-    private var expectedConfigurationChange: (engineID: ObjectIdentifier, expiresAt: Date)?
+    private let defaultInputDeviceListenerQueue = DispatchQueue(
+        label: "org.subtext.capture.default-microphone"
+    )
+    private var defaultInputDeviceListener: AudioObjectPropertyListenerBlock?
     private var inputWatchdogTask: Task<Void, Never>?
+    private var hasReportedUnsupportedInputFormat = false
     private let inputStateLock = NSLock()
     private var lastInputBufferAt = Date.distantPast
     private var hasReportedInputStall = false
@@ -1742,9 +2187,30 @@ final class MicrophoneCaptureCoordinator {
             // callback returns so teardown doesn't run inside that callback.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self, weak changedEngine] in
                 guard let self, let changedEngine, self.engine === changedEngine else { return }
-                guard !self.isExpectedConfigurationChange(from: changedEngine) else { return }
                 self.recoverInput(reason: "audio engine configuration changed")
             }
+        }
+
+        var address = Self.defaultInputDevicePropertyAddress
+        let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            // The default device can change without changing sample rate or
+            // channel count, so AVAudioEngine may keep delivering silent
+            // buffers without posting its configuration-change notification.
+            // Rebuild after Core Audio finishes switching the route.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                self?.recoverInput(reason: "macOS default microphone changed")
+            }
+        }
+        let listenerStatus = AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            defaultInputDeviceListenerQueue,
+            listener
+        )
+        if listenerStatus == noErr {
+            defaultInputDeviceListener = listener
+        } else {
+            NSLog("Subtext could not monitor the default microphone route: %d", listenerStatus)
         }
     }
 
@@ -1752,6 +2218,15 @@ final class MicrophoneCaptureCoordinator {
         inputWatchdogTask?.cancel()
         if let engineConfigurationObserver {
             NotificationCenter.default.removeObserver(engineConfigurationObserver)
+        }
+        if let defaultInputDeviceListener {
+            var address = Self.defaultInputDevicePropertyAddress
+            AudioObjectRemovePropertyListenerBlock(
+                AudioObjectID(kAudioObjectSystemObject),
+                &address,
+                defaultInputDeviceListenerQueue,
+                defaultInputDeviceListener
+            )
         }
     }
 
@@ -1779,7 +2254,6 @@ final class MicrophoneCaptureCoordinator {
             throw MicrophoneCaptureError.inputTapAlreadyInstalled
         }
         let inputNode = engine.inputNode
-        try selectMacBookMicrophone(on: inputNode)
         let inputFormat = inputNode.outputFormat(forBus: 0)
         guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
             throw MicrophoneCaptureError.inputUnavailable
@@ -1789,17 +2263,32 @@ final class MicrophoneCaptureCoordinator {
             sampleRate: sampleRate,
             channels: 1,
             interleaved: false
-        ), let converter = AVAudioConverter(from: inputFormat, to: outputFormat) else {
-            throw MicrophoneCaptureError.converterUnavailable
+        ) else {
+            throw MicrophoneCaptureError.outputFormatUnavailable
         }
-        // Built-in Mac microphones can expose several channels. AVAudioConverter
-        // defaults to channel remapping, which can select a quiet array channel;
-        // mix the microphone channels into mono so speech is retained.
-        converter.downmix = true
+        guard let converter = AVAudioConverter(from: inputFormat, to: outputFormat) else {
+            diagnosticHandler?(
+                "audio_converter_unavailable",
+                "Could not convert input format \(inputFormat) to mono 16 kHz float32."
+            )
+            throw MicrophoneCaptureError.converterUnavailable(inputFormat.description)
+        }
+        // Keep the backend contract mono while mapping one measured input
+        // channel directly. A multi-channel output format can fail to initialize
+        // for devices whose input layout has more than two channels.
+        converter.downmix = false
+        converter.channelMap = [NSNumber(value: 0)]
 
         self.inputNode = inputNode
         self.converter = converter
         self.outputFormat = outputFormat
+        diagnosticHandler?(
+            "input_format",
+            "Using macOS default input \(Self.defaultInputDeviceDescription()): "
+                + "\(Int(inputFormat.sampleRate)) Hz, "
+                + "\(inputFormat.channelCount) channel(s), \(inputFormat.commonFormat); "
+                + "routing the strongest input channel to mono 16 kHz."
+        )
         inputNode.installTap(onBus: 0, bufferSize: 4_096, format: inputFormat) { [weak self] buffer, _ in
             self?.convertAndSend(buffer)
         }
@@ -1826,140 +2315,6 @@ final class MicrophoneCaptureCoordinator {
         return muted
     }
 
-    private func selectMacBookMicrophone(on inputNode: AVAudioInputNode) throws {
-        guard let device = Self.macBookInputDevice() else {
-            throw MicrophoneCaptureError.builtInInputUnavailable
-        }
-        guard let audioUnit = inputNode.audioUnit else {
-            throw MicrophoneCaptureError.inputSelectionFailed(-1)
-        }
-        var currentDeviceID = kAudioObjectUnknown
-        var propertySize = UInt32(MemoryLayout<AudioDeviceID>.size)
-        let currentDeviceStatus = AudioUnitGetProperty(
-            audioUnit,
-            kAudioOutputUnitProperty_CurrentDevice,
-            kAudioUnitScope_Global,
-            0,
-            &currentDeviceID,
-            &propertySize
-        )
-        if currentDeviceStatus != noErr || currentDeviceID != device.id {
-            expectConfigurationChange(from: engine)
-            var deviceID = device.id
-            let status = AudioUnitSetProperty(
-                audioUnit,
-                kAudioOutputUnitProperty_CurrentDevice,
-                kAudioUnitScope_Global,
-                0,
-                &deviceID,
-                UInt32(MemoryLayout<AudioDeviceID>.size)
-            )
-            guard status == noErr else {
-                clearExpectedConfigurationChange(from: engine)
-                throw MicrophoneCaptureError.inputSelectionFailed(status)
-            }
-        }
-        diagnosticHandler?("input_selected", "Using the built-in Mac microphone: \(device.name).")
-    }
-
-    private static func macBookInputDevice() -> (id: AudioDeviceID, name: String)? {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDevices,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var dataSize: UInt32 = 0
-        guard AudioObjectGetPropertyDataSize(
-            AudioObjectID(kAudioObjectSystemObject),
-            &address,
-            0,
-            nil,
-            &dataSize
-        ) == noErr else {
-            return nil
-        }
-        let deviceCount = Int(dataSize) / MemoryLayout<AudioDeviceID>.size
-        guard deviceCount > 0 else { return nil }
-        var deviceIDs = [AudioDeviceID](repeating: kAudioObjectUnknown, count: deviceCount)
-        let readStatus = deviceIDs.withUnsafeMutableBytes { buffer in
-            AudioObjectGetPropertyData(
-                AudioObjectID(kAudioObjectSystemObject),
-                &address,
-                0,
-                nil,
-                &dataSize,
-                buffer.baseAddress!
-            )
-        }
-        guard readStatus == noErr else { return nil }
-
-        let builtInInputs = deviceIDs.compactMap { deviceID -> (AudioDeviceID, String)? in
-            guard transportType(of: deviceID) == kAudioDeviceTransportTypeBuiltIn,
-                  inputChannelCount(of: deviceID) > 0 else {
-                return nil
-            }
-            return (deviceID, deviceName(of: deviceID) ?? "Built-in microphone")
-        }
-        return builtInInputs.first(where: { $0.1.localizedCaseInsensitiveContains("MacBook") })
-            ?? builtInInputs.first(where: { $0.1.localizedCaseInsensitiveContains("microphone") })
-            ?? builtInInputs.first
-            .map { (id: $0.0, name: $0.1) }
-    }
-
-    private static func transportType(of deviceID: AudioDeviceID) -> UInt32? {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyTransportType,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var value: UInt32 = 0
-        var size = UInt32(MemoryLayout<UInt32>.size)
-        guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &value) == noErr else {
-            return nil
-        }
-        return value
-    }
-
-    private static func deviceName(of deviceID: AudioDeviceID) -> String? {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioObjectPropertyName,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var value: Unmanaged<CFString>?
-        var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
-        guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &value) == noErr,
-              let value else {
-            return nil
-        }
-        return value.takeUnretainedValue() as String
-    }
-
-    private static func inputChannelCount(of deviceID: AudioDeviceID) -> Int {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyStreamConfiguration,
-            mScope: kAudioDevicePropertyScopeInput,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var size: UInt32 = 0
-        guard AudioObjectGetPropertyDataSize(deviceID, &address, 0, nil, &size) == noErr,
-              size >= UInt32(MemoryLayout<AudioBufferList>.size) else {
-            return 0
-        }
-        let buffer = UnsafeMutableRawPointer.allocate(
-            byteCount: Int(size),
-            alignment: MemoryLayout<AudioBufferList>.alignment
-        )
-        defer { buffer.deallocate() }
-        guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, buffer) == noErr else {
-            return 0
-        }
-        let list = UnsafeMutableAudioBufferListPointer(
-            buffer.bindMemory(to: AudioBufferList.self, capacity: 1)
-        )
-        return list.reduce(0) { $0 + Int($1.mNumberChannels) }
-    }
-
     private func clearInputConfiguration() {
         inputNode = nil
         converter = nil
@@ -1981,34 +2336,6 @@ final class MicrophoneCaptureCoordinator {
         removeInputTap()
         clearInputConfiguration()
         engine = AVAudioEngine()
-    }
-
-    private func expectConfigurationChange(from audioEngine: AVAudioEngine) {
-        configurationChangeLock.lock()
-        expectedConfigurationChange = (
-            engineID: ObjectIdentifier(audioEngine),
-            expiresAt: Date().addingTimeInterval(2)
-        )
-        configurationChangeLock.unlock()
-    }
-
-    private func clearExpectedConfigurationChange(from audioEngine: AVAudioEngine) {
-        configurationChangeLock.lock()
-        if expectedConfigurationChange?.engineID == ObjectIdentifier(audioEngine) {
-            expectedConfigurationChange = nil
-        }
-        configurationChangeLock.unlock()
-    }
-
-    private func isExpectedConfigurationChange(from audioEngine: AVAudioEngine) -> Bool {
-        configurationChangeLock.lock()
-        defer { configurationChangeLock.unlock() }
-        guard let expected = expectedConfigurationChange else { return false }
-        guard Date() <= expected.expiresAt else {
-            expectedConfigurationChange = nil
-            return false
-        }
-        return expected.engineID == ObjectIdentifier(audioEngine)
     }
 
     private func markInputBufferClockStarted() {
@@ -2101,31 +2428,79 @@ final class MicrophoneCaptureCoordinator {
         }
     }
 
+    private static var defaultInputDevicePropertyAddress: AudioObjectPropertyAddress {
+        AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+    }
+
+    private static func defaultInputDeviceDescription() -> String {
+        var deviceID = AudioDeviceID(kAudioObjectUnknown)
+        var address = defaultInputDevicePropertyAddress
+        var dataSize = UInt32(MemoryLayout<AudioDeviceID>.size)
+        let status = AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            0,
+            nil,
+            &dataSize,
+            &deviceID
+        )
+        guard status == noErr, deviceID != kAudioObjectUnknown else {
+            return "unavailable (Core Audio status \(status))"
+        }
+
+        var nameAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioObjectPropertyName,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var unmanagedName: Unmanaged<CFString>?
+        var nameSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        guard AudioObjectGetPropertyData(
+            deviceID,
+            &nameAddress,
+            0,
+            nil,
+            &nameSize,
+            &unmanagedName
+        ) == noErr, let unmanagedName else {
+            return "device \(deviceID)"
+        }
+        return "\(unmanagedName.takeUnretainedValue() as String) (device \(deviceID))"
+    }
+
     private func convertAndSend(_ inputBuffer: AVAudioPCMBuffer) {
         guard inputBuffer.frameLength > 0 else { return }
         markInputBufferReceived()
         bufferHandler?()
         guard let converter, let outputFormat else { return }
 
-        // Measure the actual input-node tap before conversion so the UI can
-        // distinguish a missing audio callback from a converter/downmix issue.
-        if let channels = inputBuffer.floatChannelData {
-            let frameCount = Int(inputBuffer.frameLength)
-            let channelCount = Int(inputBuffer.format.channelCount)
-            var sumSquares = 0.0
-            for channel in 0..<channelCount {
-                for frame in 0..<frameCount {
-                    let sample = Double(channels[channel][frame])
-                    sumSquares += sample * sample
-                }
+        // Measure the loudest input channel. Some audio devices expose Int16
+        // or Int32 buffers, and averaging a microphone array can cancel its
+        // channels when they arrive with different phase.
+        let inputLevels = AudioInputLevelMeter.channelRMSLevels(in: inputBuffer) ?? []
+        let strongestInputChannel = inputLevels.enumerated().max { $0.element < $1.element }?.offset ?? 0
+        if let level = inputLevels.max() {
+            levelHandler?(level)
+        } else {
+            levelHandler?(0)
+            if !hasReportedUnsupportedInputFormat {
+                hasReportedUnsupportedInputFormat = true
+                diagnosticHandler?(
+                    "unsupported_input_format",
+                    "Microphone buffers arrived in an unsupported PCM format: "
+                        + "\(inputBuffer.format.commonFormat)."
+                )
             }
-            let sampleCount = max(frameCount * channelCount, 1)
-            levelHandler?(sqrt(sumSquares / Double(sampleCount)))
         }
 
         // The call-window stream remains active while local microphone
         // transcription is muted.
         guard !isMuted() else { return }
+        converter.channelMap = [NSNumber(value: strongestInputChannel)]
 
         let ratio = outputFormat.sampleRate / inputBuffer.format.sampleRate
         let outputCapacity = AVAudioFrameCount(ceil(Double(inputBuffer.frameLength) * ratio) + 32)
@@ -2151,6 +2526,12 @@ final class MicrophoneCaptureCoordinator {
               outputBuffer.frameLength > 0,
               let channels = outputBuffer.floatChannelData
         else {
+            if status == .error {
+                diagnosticHandler?(
+                    "audio_conversion_failed",
+                    conversionError?.localizedDescription ?? "The microphone audio converter failed."
+                )
+            }
             return
         }
 
@@ -2168,15 +2549,15 @@ final class MicrophoneCaptureCoordinator {
         ]
         messageHandler?(message)
     }
+
 }
 
 private enum MicrophoneCaptureError: LocalizedError {
     case permissionDenied
     case inputUnavailable
     case inputTapAlreadyInstalled
-    case builtInInputUnavailable
-    case inputSelectionFailed(OSStatus)
-    case converterUnavailable
+    case outputFormatUnavailable
+    case converterUnavailable(String)
 
     var errorDescription: String? {
         switch self {
@@ -2186,12 +2567,10 @@ private enum MicrophoneCaptureError: LocalizedError {
             "No microphone input is available. Choose an input in System Settings → Sound → Input."
         case .inputTapAlreadyInstalled:
             "Subtext could not restart microphone capture safely. Stop listening and start again."
-        case .builtInInputUnavailable:
-            "The built-in Mac microphone could not be found. Check System Settings → Sound → Input."
-        case .inputSelectionFailed(let status):
-            "Subtext could not select the built-in Mac microphone (Core Audio error \(status))."
-        case .converterUnavailable:
-            "Subtext could not prepare the microphone audio format."
+        case .outputFormatUnavailable:
+            "Subtext could not prepare mono 16 kHz microphone audio."
+        case .converterUnavailable(let inputFormat):
+            "Subtext could not convert the selected microphone format (\(inputFormat)) to mono 16 kHz audio."
         }
     }
 }
@@ -2221,6 +2600,10 @@ final class ScreenCaptureCoordinator: NSObject, ObservableObject, SCStreamOutput
     @Published private(set) var errorMessage: String?
 
     private var stream: SCStream?
+    // ScreenCaptureKit emits many short call-audio callbacks. Batch them off
+    // the main actor before JSON/base64 encoding to keep the websocket sender
+    // from falling behind during meetings.
+    nonisolated private let audioBatcher = AudioChunkBatcher(targetDuration: 0.1)
     private var faceTracks: [String: FaceTrackState] = [:]
     private var speakerTileState: SpeakerTileState?
     private var stableVisibleFaceCount: Int?
@@ -2321,6 +2704,9 @@ final class ScreenCaptureCoordinator: NSObject, ObservableObject, SCStreamOutput
     func stop() async throws {
         guard let stream else { return }
         try await stream.stopCapture()
+        if let tail = audioBatcher.flush() {
+            messageHandler?(Self.audioMessage(from: tail))
+        }
         self.stream = nil
         activeWindow = nil
         activeWindowScreenFrame = nil
@@ -2347,9 +2733,11 @@ final class ScreenCaptureCoordinator: NSObject, ObservableObject, SCStreamOutput
         let capturedAt = Date().timeIntervalSince1970
         switch outputType {
         case .audio:
-            guard let message = Self.audioMessage(from: sampleBuffer, capturedAt: capturedAt) else { return }
-            Task { @MainActor [weak self] in
-                self?.messageHandler?(message)
+            guard let chunk = Self.audioPCMChunk(from: sampleBuffer, capturedAt: capturedAt) else { return }
+            for readyChunk in audioBatcher.append(chunk) {
+                Task { @MainActor [weak self] in
+                    self?.messageHandler?(Self.audioMessage(from: readyChunk))
+                }
             }
         case .screen:
             guard let output = Self.visualCapture(from: sampleBuffer, capturedAt: capturedAt) else { return }
@@ -2662,10 +3050,10 @@ final class ScreenCaptureCoordinator: NSObject, ObservableObject, SCStreamOutput
         return nil
     }
 
-    nonisolated private static func audioMessage(
+    nonisolated private static func audioPCMChunk(
         from sampleBuffer: CMSampleBuffer,
         capturedAt: TimeInterval
-    ) -> [String: Any]? {
+    ) -> AudioPCMChunk? {
         guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),
               let streamDescription = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription)?.pointee,
               let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer)
@@ -2696,12 +3084,21 @@ final class ScreenCaptureCoordinator: NSObject, ObservableObject, SCStreamOutput
         }
         guard status == noErr else { return nil }
 
-        return [
+        return AudioPCMChunk(
+            timestamp: capturedAt,
+            sampleRate: Int(streamDescription.mSampleRate),
+            pcmFormat: pcmFormat,
+            samples: samples
+        )
+    }
+
+    nonisolated private static func audioMessage(from chunk: AudioPCMChunk) -> [String: Any] {
+        [
             "type": "audio_chunk",
-            "timestamp": capturedAt,
-            "sample_rate": Int(streamDescription.mSampleRate),
-            "pcm_format": pcmFormat,
-            "samples": samples.base64EncodedString()
+            "timestamp": chunk.timestamp,
+            "sample_rate": chunk.sampleRate,
+            "pcm_format": chunk.pcmFormat,
+            "samples": chunk.samples.base64EncodedString()
         ]
     }
 

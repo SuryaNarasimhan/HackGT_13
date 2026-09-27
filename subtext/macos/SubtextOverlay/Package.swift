@@ -8,8 +8,16 @@ let package = Package(
         .executable(name: "SubtextOverlay", targets: ["SubtextOverlay"])
     ],
     targets: [
+        .target(
+            name: "CaptureSupport",
+            path: "CaptureSupport",
+            linkerSettings: [
+                .linkedFramework("AVFoundation")
+            ]
+        ),
         .executableTarget(
             name: "SubtextOverlay",
+            dependencies: ["CaptureSupport"],
             path: "Sources",
             linkerSettings: [
                 .linkedFramework("ScreenCaptureKit"),
@@ -17,6 +25,11 @@ let package = Package(
                 .linkedFramework("AudioToolbox"),
                 .linkedFramework("CoreAudio")
             ]
+        ),
+        .testTarget(
+            name: "CaptureSupportTests",
+            dependencies: ["CaptureSupport"],
+            path: "Tests/CaptureSupportTests"
         )
     ]
 )

@@ -218,6 +218,7 @@ class StreamingValenceModel:
                 self._emit(
                     {
                         "type": "valence_update",
+                        "visual_id": message.get("id"),
                         "timestamp": float(message.get("timestamp", time.time())),
                         "scores": scores,
                     },

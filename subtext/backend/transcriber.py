@@ -13,6 +13,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from sarcasm import SarcasmDetector
 from schemas import AudioCue, SpeechSegment
 
 
@@ -25,13 +26,22 @@ class AudioTranscriber:
 
     sample_rate = 16_000
     block_size = 1_600
-    # Require a clear voice-level signal before asking Whisper to decode a clip.
-    # The previous microphone threshold admitted room noise and input hiss.
-    microphone_speech_threshold = 0.012
-    call_speech_threshold = 0.012
+    # Input levels vary substantially by device, meeting app, and speaker.
+    # Keep the local gate permissive; Whisper provides the second stage of filtering.
+    # The on-device microphone can be substantially quieter than call-window
+    # loopback audio (especially on built-in laptop microphone arrays). Keep
+    # its gate low enough to preserve ordinary speech; Whisper's own VAD and
+    # segment confidence checks remain the false-positive filter.
+    microphone_speech_threshold = 0.003
+    call_speech_threshold = 0.006
+    pre_roll_frames = 2
     silence_seconds = 0.70
     max_utterance_seconds = 12.0
     min_utterance_seconds = 0.40
+    whisper_vad_threshold = 0.50
+    whisper_no_speech_threshold = 0.60
+    whisper_log_probability_threshold = -1.0
+    whisper_compression_ratio_threshold = 2.4
 
     def __init__(self) -> None:
         self.state = "idle"
@@ -46,6 +56,7 @@ class AudioTranscriber:
         self._event_handler: EventHandler | None = None
         self._last_turn: tuple[str, float] | None = None
         self._feature_baselines: dict[str, deque[dict[str, float]]] = {}
+        self._sarcasm_detectors: dict[str, SarcasmDetector] = {}
         self._context_lock = threading.Lock()
         self._metrics_lock = threading.Lock()
         self._source_lock = threading.Lock()
@@ -91,6 +102,10 @@ class AudioTranscriber:
         with self._context_lock:
             self._last_turn = None
             self._feature_baselines.clear()
+            detectors = tuple(self._sarcasm_detectors.values())
+            self._sarcasm_detectors.clear()
+        for detector in detectors:
+            detector.reset()
 
     async def start(
         self,
@@ -237,10 +252,12 @@ class AudioTranscriber:
             source_state = states.get(speaker_id)
             if (
                 source_state is not None
-                and source_state["active"]
                 and captured_at - source_state.get("last_packet_end_epoch", captured_at) > 0.25
             ):
-                self._flush_utterance(speaker_id, source_state)
+                if source_state["active"]:
+                    self._flush_utterance(speaker_id, source_state)
+                else:
+                    source_state["pre_roll"].clear()
 
             offset = 0
             while offset < len(audio):
@@ -250,7 +267,14 @@ class AudioTranscriber:
                 offset += len(frame)
             state = states.setdefault(
                 speaker_id,
-                {"chunks": [], "active": False, "start_epoch": 0.0, "last_voice_epoch": 0.0},
+                {
+                    "chunks": [],
+                    "active": False,
+                    "start_epoch": 0.0,
+                    "voice_start_epoch": 0.0,
+                    "last_voice_epoch": 0.0,
+                    "pre_roll": deque(maxlen=self.pre_roll_frames),
+                },
             )
             state["last_packet_end_epoch"] = captured_at + len(audio) / self.sample_rate
 
@@ -272,8 +296,10 @@ class AudioTranscriber:
                 "chunks": [],
                 "active": False,
                 "start_epoch": 0.0,
+                "voice_start_epoch": 0.0,
                 "last_voice_epoch": 0.0,
                 "source_generation": 0,
+                "pre_roll": deque(maxlen=self.pre_roll_frames),
             },
         )
         rms = float(self._numpy.sqrt(self._numpy.mean(frame * frame))) if len(frame) else 0.0
@@ -287,8 +313,12 @@ class AudioTranscriber:
 
         if is_voice:
             if not state["active"]:
-                state["chunks"] = []
-                state["start_epoch"] = frame_start_epoch
+                pre_roll = list(state["pre_roll"])
+                pre_roll_samples = sum(len(chunk) for chunk in pre_roll)
+                state["chunks"] = pre_roll
+                state["start_epoch"] = frame_start_epoch - pre_roll_samples / self.sample_rate
+                state["voice_start_epoch"] = frame_start_epoch
+                state["pre_roll"].clear()
                 state["active"] = True
                 state["source_generation"] = generation
                 with self._metrics_lock:
@@ -305,6 +335,8 @@ class AudioTranscriber:
             state["chunks"].append(frame)
             if frame_end_epoch - state["last_voice_epoch"] >= self.silence_seconds:
                 self._flush_utterance(speaker_id, state)
+        else:
+            state["pre_roll"].append(frame)
 
         if state["active"]:
             duration = sum(len(chunk) for chunk in state["chunks"]) / self.sample_rate
@@ -333,6 +365,7 @@ class AudioTranscriber:
         if state is not None:
             state["chunks"] = []
             state["active"] = False
+            state["pre_roll"].clear()
 
     def _flush_utterance(self, speaker_id: str, state: dict[str, Any]) -> None:
         if not state["active"] or not state["chunks"]:
@@ -344,7 +377,8 @@ class AudioTranscriber:
         state["chunks"] = []
         state["active"] = False
 
-        if end_epoch - start_epoch < self.min_utterance_seconds:
+        voice_duration = end_epoch - float(state.get("voice_start_epoch", start_epoch))
+        if voice_duration < self.min_utterance_seconds:
             with self._metrics_lock:
                 self._metrics["utterances_too_short"] += 1
             return
@@ -389,15 +423,15 @@ class AudioTranscriber:
                 beam_size=5,
                 vad_filter=True,
                 vad_parameters={
-                    "threshold": 0.55,
+                    "threshold": self.whisper_vad_threshold,
                     "min_speech_duration_ms": 250,
                     "min_silence_duration_ms": 300,
                     "speech_pad_ms": 120,
                 },
                 condition_on_previous_text=False,
-                no_speech_threshold=0.45,
-                log_prob_threshold=-0.65,
-                compression_ratio_threshold=2.2,
+                no_speech_threshold=self.whisper_no_speech_threshold,
+                log_prob_threshold=self.whisper_log_probability_threshold,
+                compression_ratio_threshold=self.whisper_compression_ratio_threshold,
             )
             accepted_segments = []
             rejected_segments = 0
@@ -408,9 +442,9 @@ class AudioTranscriber:
                 compression_ratio = getattr(segment, "compression_ratio", float("inf"))
                 if (
                     segment_text
-                    and no_speech_probability <= 0.45
-                    and average_log_probability >= -0.65
-                    and compression_ratio <= 2.2
+                    and no_speech_probability <= self.whisper_no_speech_threshold
+                    and average_log_probability >= self.whisper_log_probability_threshold
+                    and compression_ratio <= self.whisper_compression_ratio_threshold
                 ):
                     accepted_segments.append(segment_text)
                 else:
@@ -460,7 +494,47 @@ class AudioTranscriber:
                 start_s,
                 end_s,
             )
+            with self._context_lock:
+                detector = self._sarcasm_detectors.setdefault(
+                    speaker_id,
+                    SarcasmDetector(),
+                )
+            mismatch_candidate, mismatch_diagnostics = detector.analyze_with_diagnostics(
+                text,
+                audio,
+                self.sample_rate,
+                self._numpy,
+            )
+            logger.info(
+                "[Mismatch] local assessment | cue_id=%s source=%s time=%.1f-%.1fs "
+                "text_score=%.3f audio_score=%.3f combined_score=%.3f detected=%s "
+                "text_evidence=%s audio_evidence=%s baseline_utterances=%d",
+                cue_id,
+                speaker_id,
+                start_s,
+                end_s,
+                mismatch_diagnostics["text_score"],
+                mismatch_diagnostics["audio_score"],
+                mismatch_diagnostics["combined_score"],
+                mismatch_diagnostics["detected"],
+                mismatch_diagnostics["text_evidence"],
+                mismatch_diagnostics["audio_evidence"],
+                mismatch_diagnostics["baseline_utterances"],
+            )
             self._emit({"type": "audio_cue", "cue": audio_cue.model_dump(exclude_none=True)})
+            if mismatch_candidate:
+                self._emit(
+                    {
+                        "type": "mismatch_candidate",
+                        "id": f"mismatch-{cue_id}",
+                        "transcript_id": cue_id,
+                        "audio_id": audio_cue.id,
+                        "speaker_id": speaker_id,
+                        "start_s": start_s,
+                        "end_s": end_s,
+                        "trigger": mismatch_candidate["kind"],
+                    }
+                )
             self._emit(
                 {
                     "type": "transcript",

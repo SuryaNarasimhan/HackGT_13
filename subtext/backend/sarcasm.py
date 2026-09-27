@@ -53,9 +53,28 @@ class SarcasmDetector:
         sample_rate: int,
         numpy: Any,
     ) -> dict[str, Any] | None:
+        candidate, _ = self.analyze_with_diagnostics(text, audio, sample_rate, numpy)
+        return candidate
+
+    def analyze_with_diagnostics(
+        self,
+        text: str,
+        audio: Any,
+        sample_rate: int,
+        numpy: Any,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+        """Return a candidate and bounded scores for terminal diagnostics."""
         normalized = " ".join(text.lower().split())
         if not normalized:
-            return None
+            return None, {
+                "text_score": 0.0,
+                "audio_score": 0.0,
+                "combined_score": 0.0,
+                "detected": False,
+                "text_evidence": [],
+                "audio_evidence": [],
+                "baseline_utterances": len(self._audio_baseline),
+            }
 
         with self._lock:
             text_score, text_evidence, sentiment = self._text_cues(normalized)
@@ -70,19 +89,31 @@ class SarcasmDetector:
                 and audio_score >= 0.58
                 and combined_score >= 0.64
             )
+            diagnostics = {
+                "text_score": round(text_score, 3),
+                "audio_score": round(audio_score, 3),
+                "combined_score": round(combined_score, 3),
+                "detected": detected,
+                "text_evidence": list(dict.fromkeys(text_evidence)),
+                "audio_evidence": list(dict.fromkeys(audio_evidence)),
+                "baseline_utterances": len(self._audio_baseline),
+            }
 
             self._context.append(sentiment)
             if features:
                 self._audio_baseline.append(features)
 
             if not detected:
-                return None
+                return None, diagnostics
 
-            return {
-                "kind": "possible_sarcasm",
-                "label": "Possible sarcasm",
-                "evidence": list(dict.fromkeys(text_evidence + audio_evidence)),
-            }
+            return (
+                {
+                    "kind": "possible_sarcasm",
+                    "label": "Possible sarcasm",
+                    "evidence": list(dict.fromkeys(text_evidence + audio_evidence)),
+                },
+                diagnostics,
+            )
 
     def _text_cues(self, text: str) -> tuple[float, list[str], float]:
         tokens = _WORD_PATTERN.findall(text)

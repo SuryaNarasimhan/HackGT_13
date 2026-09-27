@@ -54,6 +54,8 @@ class VisualSubjectCue(StrictModel):
     left_eye_aperture: float | None = Field(default=None, description="Local landmark height-to-width ratio for the left-eye region.")
     right_eye_aperture: float | None = Field(default=None, description="Local landmark height-to-width ratio for the right-eye region.")
     change_from_baseline: dict[str, float] = Field(default_factory=dict)
+    facial_valence: float | None = Field(default=None, ge=-1, le=1, description="Smoothed local face-model valence estimate; not a probability.")
+    valence_frames_seen: int | None = Field(default=None, ge=0)
     confidence: float | None = Field(default=None, ge=0, le=1)
 
 
@@ -63,6 +65,18 @@ class VisualCue(StrictModel):
     end_s: float = Field(ge=0)
     subjects: list[VisualSubjectCue] = Field(default_factory=list)
     quality: dict[str, str | float | bool] = Field(default_factory=dict)
+
+
+class MismatchCandidate(StrictModel):
+    """Local text-and-voice gate result awaiting multimodal review."""
+
+    id: str
+    transcript_id: str
+    audio_id: str
+    speaker_id: str
+    start_s: float = Field(ge=0)
+    end_s: float = Field(ge=0)
+    trigger: str = "local_text_voice_incongruity"
 
 
 class AlignedStep(StrictModel):
@@ -80,6 +94,7 @@ class AlignedSequence(StrictModel):
     transcript: list[TranscriptCue] = Field(default_factory=list)
     audio: list[AudioCue] = Field(default_factory=list)
     visual: list[VisualCue] = Field(default_factory=list)
+    mismatch_candidates: list[MismatchCandidate] = Field(default_factory=list)
     timeline: list[AlignedStep] = Field(default_factory=list)
 
 

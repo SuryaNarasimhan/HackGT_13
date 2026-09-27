@@ -111,7 +111,17 @@ async def _diagnostic_heartbeat() -> None:
 
 
 async def broadcast(event: dict[str, Any]) -> None:
-    if event.get("type") in {"transcript", "llm_analysis"}:
+    if event.get("type") == "valence_update" and conversation.session_id:
+        conversation.add_valence_update(event)
+        await conversation.maybe_analyze(broadcast)
+
+    if event.get("type") in {
+        "transcript",
+        "llm_analysis",
+        "mismatch_candidate",
+        "mismatch_review",
+        "mismatch_alert",
+    }:
         history.append(event)
 
     stale: list[WebSocket] = []
@@ -133,6 +143,16 @@ async def handle_transcriber_event(event: dict[str, Any]) -> None:
     try:
         if event_type == "audio_cue":
             conversation.add_audio_event(event)
+            return
+        if event_type == "mismatch_candidate":
+            if conversation.session_id:
+                conversation.add_mismatch_candidate(event)
+                await broadcast(event)
+            else:
+                logger.info(
+                    "[Mismatch] candidate dropped outside capture session; id=%s",
+                    event.get("id"),
+                )
             return
         if event_type == "transcript":
             logger.info(
